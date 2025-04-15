@@ -1,0 +1,43 @@
+elif line.strip() == "lidar":
+    print("[AGV] Initierar LIDAR-stream till ÖS...")
+
+    # Starta LIDAR
+    with serial.Serial(LIDAR_PORT, LIDAR_BAUDRATE, timeout=1) as ser:
+        ser.write(CMD_STOP)
+        time.sleep(0.1)
+        ser.reset_input_buffer()
+        ser.write(CMD_SCAN)
+        get_descriptor(ser)
+
+        temp_array = [0] * len(check_angles)
+        current_index = 0
+
+        try:
+            while True:
+                packet = ser.read(5)
+                if len(packet) != 5:
+                    continue
+
+                result = parse_packet(packet)
+                if result is None:
+                    continue
+
+                angle, distance_cm, _ = result
+                angle_rounded = round(angle)
+
+                target_angle = check_angles[current_index]
+                if abs(angle_rounded - target_angle) <= 1:
+                    temp_array[current_index] = round(distance_cm, 1)
+                    current_index += 1
+
+                    if current_index >= len(check_angles):
+                        current_index = 0
+                        lidar_string = "LIDAR:" + ",".join(map(str, temp_array))
+                        client_sock.send((lidar_string + "\n").encode("utf-8"))
+                        print("[AGV] Skickar:", lidar_string)
+
+        except Exception as e:
+            print("[AGV] LIDAR-fel:", e)
+        finally:
+            ser.write(CMD_STOP)
+            time.sleep(0.1)
