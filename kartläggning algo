@@ -7,10 +7,11 @@ import struct
 # === LIDAR KONFIGURATION ===
 LIDAR_PORT = "/dev/ttyUSB0"
 LIDAR_BAUDRATE = 460800
+lidar_active = False
 
 CMD_STOP = b'\xA5\x25'
 CMD_SCAN = b'\xA5\x20'
-check_angles = [i for i in range(0, 360, 15)]
+check_angles = [i for i in range(0, 360, 45)]
 
 def get_descriptor(ser):
     descriptor = ser.read(7)
@@ -32,7 +33,7 @@ def parse_packet(packet):
     angle_q6 = ((b2 << 7) | (b1 >> 1))
     angle = angle_q6 / 64.0
     dist_q2 = (b4 << 8) | b3
-    distance_cm = (dist_q2 / 4.0) / 10.0
+    distance_cm = round((dist_q2 / 4.0) / 10.0)
 
     return angle, distance_cm, quality
 
@@ -94,6 +95,7 @@ try:
 
                         try:
                             with serial.Serial(LIDAR_PORT, LIDAR_BAUDRATE, timeout=1) as ser:
+								
                                 ser.write(CMD_STOP)
                                 time.sleep(0.1)
                                 ser.reset_input_buffer()
@@ -104,6 +106,15 @@ try:
                                 current_index = 0
 
                                 while True:
+									client_sock.settimeout(0.01)
+									try:
+										new_data = client_sock.recv(1024).decode("utf-8").strip()
+										if "stop" in new_data
+										    print("[AGV] Mottog STOP - avbryter LIDAR..")
+										    break
+										    
+								    except bluetooth.BluetoothError:
+										pass
                                     packet = ser.read(5)
                                     if len(packet) != 5:
                                         continue
@@ -124,20 +135,23 @@ try:
                                             current_index = 0
                                             lidar_string = "LIDAR:" + ",".join(map(str, temp_array))
                                             client_sock.send((lidar_string + "\n").encode("utf-8"))
+                                            
                                             print("[AGV] Skickar:", lidar_string)
+                                           
 
                         except Exception as e:
                             print("[AGV] LIDAR-fel:", e)
 
                         finally:
                             try:
+								
                                 ser.write(CMD_STOP)
                                 time.sleep(0.1)
                             except:
                                 pass
 
                 data_buffer = ""
-
+                   
         except OSError as e:
             print(f"[AGV] Anslutning avslutad ({e})")
 
