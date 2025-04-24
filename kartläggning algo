@@ -7,8 +7,6 @@ import struct
 # === LIDAR KONFIGURATION ===
 LIDAR_PORT = "/dev/ttyUSB0"
 LIDAR_BAUDRATE = 460800
-lidar_active = False
-
 CMD_STOP = b'\xA5\x25'
 CMD_SCAN = b'\xA5\x20'
 check_angles = [i for i in range(0, 360, 45)]
@@ -22,8 +20,6 @@ def parse_packet(packet):
     if len(packet) != 5:
         return None
     b0, b1, b2, b3, b4 = struct.unpack('<BBBBB', packet)
-
-    # Sync bits
     start_flag = b0 & 0x01
     inverted_start_flag = (b0 >> 1) & 0x01
     if start_flag != (~inverted_start_flag & 0x01):
@@ -34,7 +30,6 @@ def parse_packet(packet):
     angle = angle_q6 / 64.0
     dist_q2 = (b4 << 8) | b3
     distance_cm = round((dist_q2 / 4.0) / 10.0)
-
     return angle, distance_cm, quality
 
 # === BLUETOOTH SERVER START ===
@@ -50,7 +45,6 @@ try:
     while True:
         client_sock, client_info = server_sock.accept()
         print(f"[AGV] Klient ansluten: {client_info}")
-
         data_buffer = ""
 
         try:
@@ -73,18 +67,13 @@ try:
                     if line.startswith("goto"):
                         coords = line.replace("goto,", "").split(",")
                         x, y = coords if len(coords) == 2 else ("0", "0")
-
                         print(f"[AGV] Utför: x={x}, y={y}")
                         time.sleep(1.0)
 
                         with open(COMMAND_FILE, "a") as f:
                             f.write(f"{line}\n")
 
-                        status_lines = [
-                            f"status,x={x},y={y}",
-                            "klart"
-                        ]
-                        for sline in status_lines:
+                        for sline in [f"status,x={x},y={y}", "klart"]:
                             client_sock.send((sline + "\n").encode("utf-8"))
                             print(f"[AGV] Skickar: {sline}")
                         time.sleep(0.5)
@@ -95,7 +84,6 @@ try:
 
                         try:
                             with serial.Serial(LIDAR_PORT, LIDAR_BAUDRATE, timeout=1) as ser:
-								
                                 ser.write(CMD_STOP)
                                 time.sleep(0.1)
                                 ser.reset_input_buffer()
@@ -106,15 +94,16 @@ try:
                                 current_index = 0
 
                                 while True:
-									client_sock.settimeout(0.01)
-									try:
-										new_data = client_sock.recv(1024).decode("utf-8").strip()
-										if "stop" in new_data
-										    print("[AGV] Mottog STOP - avbryter LIDAR..")
-										    break
-										    
-								    except bluetooth.BluetoothError:
-										pass
+                                    # Kolla om klienten har skickat 'stop'
+                                    client_sock.settimeout(0.01)
+                                    try:
+                                        new_data = client_sock.recv(1024).decode("utf-8").strip()
+                                        if "stop" in new_data:
+                                            print("[AGV] Mottog STOP - avbryter LIDAR...")
+                                            break
+                                    except bluetooth.BluetoothError:
+                                        pass
+
                                     packet = ser.read(5)
                                     if len(packet) != 5:
                                         continue
@@ -135,23 +124,20 @@ try:
                                             current_index = 0
                                             lidar_string = "LIDAR:" + ",".join(map(str, temp_array))
                                             client_sock.send((lidar_string + "\n").encode("utf-8"))
-                                            
                                             print("[AGV] Skickar:", lidar_string)
-                                           
 
                         except Exception as e:
                             print("[AGV] LIDAR-fel:", e)
 
                         finally:
                             try:
-								
                                 ser.write(CMD_STOP)
                                 time.sleep(0.1)
                             except:
                                 pass
 
                 data_buffer = ""
-                   
+
         except OSError as e:
             print(f"[AGV] Anslutning avslutad ({e})")
 
