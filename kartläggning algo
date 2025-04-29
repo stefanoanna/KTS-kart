@@ -3,6 +3,7 @@ import time
 import os
 import serial
 import struct
+import threading
 
 # === LIDAR KONFIGURATION ===
 LIDAR_PORT = "/dev/ttyUSB0"
@@ -10,6 +11,9 @@ LIDAR_BAUDRATE = 460800
 CMD_STOP = b'\xA5\x25'
 CMD_SCAN = b'\xA5\x20'
 check_angles = [i for i in range(0, 360, 45)]
+
+# Global flagga för att styra LIDAR-scanning
+lidar_active = False
 
 def get_descriptor(ser):
     descriptor = ser.read(7)
@@ -31,6 +35,54 @@ def parse_packet(packet):
     dist_q2 = (b4 << 8) | b3
     distance_cm = round((dist_q2 / 4.0) / 10.0)
     return angle, distance_cm, quality
+
+def lidar_task(client_sock):
+    global lidar_active
+    lidar_active = True
+    try:
+        with serial.Serial(LIDAR_PORT, LIDAR_BAUDRATE, timeout=1) as ser:
+            ser.write(CMD_STOP)
+            time.sleep(0.1)
+            ser.reset_input_buffer()
+            ser.write(CMD_SCAN)
+            get_descriptor(ser)
+
+            temp_array = [0] * len(check_angles)
+            current_index = 0
+
+            while lidar_active:
+                packet = ser.read(5)
+                if len(packet) != 5:
+                    continue
+
+                result = parse_packet(packet)
+                if result is None:
+                    continue
+
+                angle, distance_cm, _ = result
+                angle_rounded = round(angle)
+                target_angle = check_angles[current_index]
+
+                if abs(angle_rounded - target_angle) <= 1:
+                    temp_array[current_index] = round(distance_cm, 1)
+                    current_index += 1
+
+                    if current_index >= len(check_angles):
+                        current_index = 0
+                        lidar_string = "LIDAR:" + ",".join(map(str, temp_array))
+                        client_sock.send((lidar_string + "\n").encode("utf-8"))
+                        print("[AGV] Skickar:", lidar_string)
+
+    except Exception as e:
+        print("[AGV] LIDAR-fel:", e)
+
+    finally:
+        try:
+            ser.write(CMD_STOP)
+            time.sleep(0.1)
+            print("[AGV] LIDAR stoppad.")
+        except:
+            pass
 
 # === BLUETOOTH SERVER START ===
 COMMAND_FILE = "command.txt"
@@ -63,7 +115,6 @@ try:
 
                     print(f"[AGV] Mottaget: {line}")
 
-                    # === GOTO-KOMMANDO ===
                     if line.startswith("goto"):
                         coords = line.replace("goto,", "").split(",")
                         x, y = coords if len(coords) == 2 else ("0", "0")
@@ -78,63 +129,14 @@ try:
                             print(f"[AGV] Skickar: {sline}")
                         time.sleep(0.5)
 
-                    # === LIDAR-KARTLÄGGNING ===
-                    elif line.strip() == "lidar":
-                        print("[AGV] Initierar LIDAR-stream till ÖS...")
+                    elif line == "lidar":
+                        print("[AGV] Initierar LIDAR-stream...")
+                        threading.Thread(target=lidar_task, args=(client_sock,), daemon=True).start()
 
-                        try:
-                            with serial.Serial(LIDAR_PORT, LIDAR_BAUDRATE, timeout=1) as ser:
-                                ser.write(CMD_STOP)
-                                time.sleep(0.1)
-                                ser.reset_input_buffer()
-                                ser.write(CMD_SCAN)
-                                get_descriptor(ser)
-
-                                temp_array = [0] * len(check_angles)
-                                current_index = 0
-
-                                while True:
-                                    # Kolla om klienten har skickat 'stop'
-                                    client_sock.settimeout(0.01)
-                                    try:
-                                        new_data = client_sock.recv(1024).decode("utf-8").strip()
-                                        if "stop" in new_data:
-                                            print("[AGV] Mottog STOP - avbryter LIDAR...")
-                                            break
-                                    except bluetooth.BluetoothError:
-                                        pass
-
-                                    packet = ser.read(5)
-                                    if len(packet) != 5:
-                                        continue
-
-                                    result = parse_packet(packet)
-                                    if result is None:
-                                        continue
-
-                                    angle, distance_cm, _ = result
-                                    angle_rounded = round(angle)
-                                    target_angle = check_angles[current_index]
-
-                                    if abs(angle_rounded - target_angle) <= 1:
-                                        temp_array[current_index] = round(distance_cm, 1)
-                                        current_index += 1
-
-                                        if current_index >= len(check_angles):
-                                            current_index = 0
-                                            lidar_string = "LIDAR:" + ",".join(map(str, temp_array))
-                                            client_sock.send((lidar_string + "\n").encode("utf-8"))
-                                            print("[AGV] Skickar:", lidar_string)
-
-                        except Exception as e:
-                            print("[AGV] LIDAR-fel:", e)
-
-                        finally:
-                            try:
-                                ser.write(CMD_STOP)
-                                time.sleep(0.1)
-                            except:
-                                pass
+                    elif line == "stop":
+                        global lidar_active
+                        print("[AGV] Mottog STOP från klient – stänger av LIDAR...")
+                        lidar_active = False
 
                 data_buffer = ""
 
