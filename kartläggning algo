@@ -40,7 +40,7 @@ def parse_packet(packet):
 
 
 def lidar_task(client_sock):
-    global lidar_active
+    global lidar_active  # <-- FIX: deklarera global på rätt plats
     lidar_active = True
     try:
         with serial.Serial(LIDAR_PORT, LIDAR_BAUDRATE, timeout=1) as ser:
@@ -138,7 +138,7 @@ try:
                         threading.Thread(target=lidar_task, args=(client_sock,), daemon=True).start()
 
                     elif line == "stop":
-                        global lidar_active
+                        global lidar_active  # <-- FIX: deklarera global här också
                         print("[AGV] Mottog STOP från klient – stänger av LIDAR...")
                         lidar_active = False
 
