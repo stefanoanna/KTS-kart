@@ -12,7 +12,7 @@ CMD_STOP = b'\xA5\x25'
 CMD_SCAN = b'\xA5\x20'
 check_angles = [i for i in range(0, 360, 45)]
 
-# Global flagga för att styra LIDAR-scanning
+# 🛠️ Ingen "global" här, bara en vanlig deklaration
 lidar_active = False
 
 
@@ -40,7 +40,7 @@ def parse_packet(packet):
 
 
 def lidar_task(client_sock):
-    global lidar_active  # <-- FIX: deklarera global på rätt plats
+    global lidar_active  # <-- Nu korrekt: bara inne i funktionen
     lidar_active = True
     try:
         with serial.Serial(LIDAR_PORT, LIDAR_BAUDRATE, timeout=1) as ser:
@@ -138,7 +138,7 @@ try:
                         threading.Thread(target=lidar_task, args=(client_sock,), daemon=True).start()
 
                     elif line == "stop":
-                        global lidar_active  # <-- FIX: deklarera global här också
+                        global lidar_active  # <-- Också korrekt här
                         print("[AGV] Mottog STOP från klient – stänger av LIDAR...")
                         lidar_active = False
 
