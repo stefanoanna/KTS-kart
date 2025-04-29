@@ -15,10 +15,12 @@ check_angles = [i for i in range(0, 360, 45)]
 # Global flagga för att styra LIDAR-scanning
 lidar_active = False
 
+
 def get_descriptor(ser):
     descriptor = ser.read(7)
     if descriptor[:2] != b'\xA5\x5A':
         raise Exception("Misslyckades med att ta emot scan descriptor")
+
 
 def parse_packet(packet):
     if len(packet) != 5:
@@ -35,6 +37,7 @@ def parse_packet(packet):
     dist_q2 = (b4 << 8) | b3
     distance_cm = round((dist_q2 / 4.0) / 10.0)
     return angle, distance_cm, quality
+
 
 def lidar_task(client_sock):
     global lidar_active
@@ -83,6 +86,7 @@ def lidar_task(client_sock):
             print("[AGV] LIDAR stoppad.")
         except:
             pass
+
 
 # === BLUETOOTH SERVER START ===
 COMMAND_FILE = "command.txt"
