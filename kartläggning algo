@@ -12,15 +12,12 @@ CMD_STOP = b'\xA5\x25'
 CMD_SCAN = b'\xA5\x20'
 check_angles = [i for i in range(0, 360, 45)]
 
-# 🛠️ Ingen "global" här, bara en vanlig deklaration
 lidar_active = False
-
 
 def get_descriptor(ser):
     descriptor = ser.read(7)
     if descriptor[:2] != b'\xA5\x5A':
         raise Exception("Misslyckades med att ta emot scan descriptor")
-
 
 def parse_packet(packet):
     if len(packet) != 5:
@@ -38,9 +35,8 @@ def parse_packet(packet):
     distance_cm = round((dist_q2 / 4.0) / 10.0)
     return angle, distance_cm, quality
 
-
 def lidar_task(client_sock):
-    global lidar_active  # <-- Nu korrekt: bara inne i funktionen
+    global lidar_active
     lidar_active = True
     try:
         with serial.Serial(LIDAR_PORT, LIDAR_BAUDRATE, timeout=1) as ser:
@@ -87,6 +83,28 @@ def lidar_task(client_sock):
         except:
             pass
 
+def dwm_position_task(client_sock):
+    try:
+        with serial.Serial("/dev/ttyACM0", 115200, timeout=1) as ser:
+            # Väck modulen
+            ser.write(b"\r\n")
+            time.sleep(0.1)
+            ser.write(b"\r\n")
+            time.sleep(0.1)
+            ser.write(b"lep\r\n")
+            time.sleep(0.5)
+
+            print("[AGV] DWM-positionering startad.")
+
+            while True:
+                line = ser.readline().decode("utf-8").strip()
+                if not line:
+                    continue
+                if line.startswith("POS") or "," in line:
+                    print(f"[AGV] Position mottagen: {line}")
+                    client_sock.send((f"POS:{line}\n").encode("utf-8"))
+    except Exception as e:
+        print("[AGV] DWM-fel:", e)
 
 # === BLUETOOTH SERVER START ===
 COMMAND_FILE = "command.txt"
@@ -138,9 +156,13 @@ try:
                         threading.Thread(target=lidar_task, args=(client_sock,), daemon=True).start()
 
                     elif line == "stop":
-                        global lidar_active  # <-- Också korrekt här
+                        global lidar_active
                         print("[AGV] Mottog STOP från klient – stänger av LIDAR...")
                         lidar_active = False
+
+                    elif line == "position":
+                        print("[AGV] Initierar DWM-positionering...")
+                        threading.Thread(target=dwm_position_task, args=(client_sock,), daemon=True).start()
 
                 data_buffer = ""
 
