@@ -1,0 +1,253 @@
+import bluetooth
+import time
+import os
+import serial
+import struct
+import threading
+import smbus2
+import math
+
+# === LIDAR KONFIGURATION ===
+LIDAR_PORT = "/dev/ttyUSB0"
+LIDAR_BAUDRATE = 460800
+CMD_STOP = b'\xA5\x25'
+CMD_SCAN = b'\xA5\x20'
+check_angles = [i for i in range(0, 360, 1)]
+
+lidar_active = False
+
+# === KOMPASS KONFIGURATION ===
+DEVICE_ADDRESS = 0x1E
+bus = smbus2.SMBus(1)
+
+# Initiera kompass till 50Hz
+bus.write_byte_data(DEVICE_ADDRESS, 0x00, 0x70) # 50 Hz
+bus.write_byte_data(DEVICE_ADDRESS, 0x01, 0x20) # Gain = +/- 1.3 Ga
+bus.write_byte_data(DEVICE_ADDRESS, 0x02, 0x00) # Mode: continous
+
+compass_active = False
+
+def read_compass_angle():
+	try:
+		data = bus.read_i2c_block_data(DEVICE_ADDRESS, 0x03, 6)
+		x = data[0] << 8 | data[1]
+		y = data[2] << 8 | data[3]
+		z = data[4] << 8 | data[5]
+		
+		x = x - 65536 if x > 32767 else x
+		y = y - 65536 if y > 32767 else y
+		
+		heading_rad = math.atan2(y, x)
+		heading_deg = math.degrees(heading_rad)
+		
+		if heading_deg < 0:
+			heading_deg += 360
+		
+		return round(heading_deg, 1)
+	except Exception as e:
+		print("[AGV] KompasslÃ¤sningfel:", e)
+		return none
+		
+def compass_task(client_sock):
+	global compass_active
+	compass_active = True
+	
+	try:
+		print("[AGV] Kompass-task startad.")
+		while compass_active:
+			angle = read_compass_angle()
+			if angle is not None:
+				compass_string = f"KOMPASS:{angle}"
+				client_sock.send((compass_string + "\n").encode("utf-8"))
+				print("[AGV] Skickar:", compass_string)
+				
+			time.sleep(0.1)
+			
+	except Exception as e:
+		print("[AGV] Kompass-fel:", e)
+		
+	print("[AGV] Kompass-task avslutat.")
+
+def get_descriptor(ser):
+    descriptor = ser.read(7)
+    if descriptor[:2] != b'\xA5\x5A':
+        raise Exception("Misslyckades med att ta emot scan descriptor")
+
+def parse_packet(packet):
+    if len(packet) != 5:
+        return None
+    b0, b1, b2, b3, b4 = struct.unpack('<BBBBB', packet)
+    start_flag = b0 & 0x01
+    inverted_start_flag = (b0 >> 1) & 0x01
+    if start_flag != (~inverted_start_flag & 0x01):
+        return None
+
+    quality = b0 >> 2
+    angle_q6 = ((b2 << 7) | (b1 >> 1))
+    angle = angle_q6 / 64.0
+    dist_q2 = (b4 << 8) | b3
+    distance_cm = round((dist_q2 / 4.0) / 10.0)
+    return angle, distance_cm, quality
+
+def lidar_task(client_sock):
+    global lidar_active
+    lidar_active = True
+    try:
+        with serial.Serial(LIDAR_PORT, LIDAR_BAUDRATE, timeout=1) as ser:
+            ser.write(CMD_STOP)
+            time.sleep(0.1)
+            ser.reset_input_buffer()
+            ser.write(CMD_SCAN)
+            get_descriptor(ser)
+
+            temp_array = [0] * len(check_angles)
+            current_index = 0
+
+            while lidar_active:
+                packet = ser.read(5)
+                if len(packet) != 5:
+                    continue
+
+                result = parse_packet(packet)
+                if result is None:
+                    continue
+
+                angle, distance_cm, _ = result
+                angle_rounded = round(angle)
+                target_angle = check_angles[current_index]
+
+                if abs(angle_rounded - target_angle) <= 1:
+                    temp_array[current_index] = round(distance_cm, 1)
+                    current_index += 1
+
+                    if current_index >= len(check_angles):
+                        current_index = 0
+                        lidar_string = "LIDAR:" + ",".join(map(str, temp_array))
+                        client_sock.send((lidar_string + "\n").encode("utf-8"))
+                        print("[AGV] Skickar:", lidar_string)
+
+    except Exception as e:
+        print("[AGV] LIDAR-fel:", e)
+
+    finally:
+        try:
+            ser.write(CMD_STOP)
+            time.sleep(0.1)
+            print("[AGV] LIDAR stoppad.")
+        except:
+            pass
+
+def dwm_position_task(client_sock):
+    try:
+        with serial.Serial("/dev/ttyACM0", 115200, timeout=1) as ser:
+            # vck modulen
+            ser.write(b"\r")
+            time.sleep(0.1)
+            ser.write(b"\r")
+            time.sleep(0.1)
+            
+            start = time.time()
+            while time.time() - start < 2:
+               if ser.in_waiting:
+                   line = ser.readline().decode("utf-8").strip()
+                   if "dwm>" in line:
+                       break
+						
+						
+            ser.write(b"lep\r")
+            time.sleep(0.2)
+
+            print("[AGV] DWM-positionering startad.")
+
+            while True:
+                line = ser.readline().decode("utf-8").strip()
+                if not line:
+                    continue
+                if line.startswith("POS,"):
+                    parts = line.split(",")
+                    if len(parts) >= 3:
+                        x = parts[1]
+                        y = parts[2]
+                        client_sock.send(f"POS:{x},{y}\r\n".encode("utf-8"))
+                        
+                        print(f"[AGV] Skickar: POS:{x},{y}")
+
+    except Exception as e:
+        print("[AGV] DWM-fel:", e)
+
+
+# === BLUETOOTH SERVER START ===
+COMMAND_FILE = "command.txt"
+server_sock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
+server_sock.bind(("", bluetooth.PORT_ANY))
+server_sock.listen(1)
+
+port = server_sock.getsockname()[1]
+print(f"[AGV] Bluetooth-server startad pÃ¥ port {port}. VÃ¤ntar pÃ¥ anslutning...")
+
+try:
+    while True:
+        client_sock, client_info = server_sock.accept()
+        print(f"[AGV] Klient ansluten: {client_info}")
+        data_buffer = ""
+
+        try:
+            while True:
+                data = client_sock.recv(1024).decode("utf-8")
+                if not data:
+                    break
+
+                data_buffer += data
+                lines = data_buffer.strip().splitlines()
+
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    print(f"[AGV] Mottaget: {line}")
+
+                    if line.startswith("goto"):
+                        coords = line.replace("goto,", "").split(",")
+                        x, y = coords if len(coords) == 2 else ("0", "0")
+                        print(f"[AGV] UtfÃ¶r: x={x}, y={y}")
+                        time.sleep(1.0)
+
+                        with open(COMMAND_FILE, "a") as f:
+                            f.write(f"{line}\n")
+
+                        for sline in [f"status,x={x},y={y}", "klart"]:
+                            client_sock.send((sline + "\n").encode("utf-8"))
+                            print(f"[AGV] Skickar: {sline}")
+                        time.sleep(0.5)
+
+                    elif line == "lidar":
+                        print("[AGV] Initierar LIDAR-stream...")
+                        threading.Thread(target=lidar_task, args=(client_sock,), daemon=True).start()
+
+                    elif line == "stop":
+                        lidar_active
+                        print("[AGV] Mottog STOP frÃ¥n klient â€ stÃ¤nger av LIDAR...")
+                        lidar_active = False
+
+                    elif line == "position":
+                        print("[AGV] Initierar DWM-positionering...")
+                        threading.Thread(target=dwm_position_task, args=(client_sock,), daemon=True).start()
+                    elif line == "kompass":
+                        print("[AGV] Initierar KOMPASS-stream...")
+                        threading.Thread(target=compass_task, args=(client_sock,), daemon=True).start()
+
+
+                data_buffer = ""
+
+        except OSError as e:
+            print(f"[AGV] Anslutning avslutad ({e})")
+
+        finally:
+            client_sock.close()
+            print("[AGV] VÃ¤ntar pÃ¥ ny anslutning...")
+
+except KeyboardInterrupt:
+    print("[AGV] Avslutar Bluetooth-server...")
+    server_sock.close()
+
