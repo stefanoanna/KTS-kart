@@ -10,7 +10,7 @@ LIDAR_PORT = "/dev/ttyUSB0"
 LIDAR_BAUDRATE = 460800
 CMD_STOP = b'\xA5\x25'
 CMD_SCAN = b'\xA5\x20'
-check_angles = [i for i in range(0, 360, 45)]
+check_angles = [i for i in range(0, 360, 1)]
 
 lidar_active = False
 
@@ -86,13 +86,22 @@ def lidar_task(client_sock):
 def dwm_position_task(client_sock):
     try:
         with serial.Serial("/dev/ttyACM0", 115200, timeout=1) as ser:
-            # Väck modulen
-            ser.write(b"\r\n")
+            # vck modulen
+            ser.write(b"\r")
             time.sleep(0.1)
-            ser.write(b"\r\n")
+            ser.write(b"\r")
             time.sleep(0.1)
-            ser.write(b"lep\r\n")
-            time.sleep(0.5)
+            
+            start = time.time()
+            while time.time() - start < 2:
+               if ser.in_waiting:
+                   line = ser.readline().decode("utf-8").strip()
+                   if "dwm>" in line:
+                       break
+						
+						
+            ser.write(b"lep\r")
+            time.sleep(0.2)
 
             print("[AGV] DWM-positionering startad.")
 
@@ -100,11 +109,18 @@ def dwm_position_task(client_sock):
                 line = ser.readline().decode("utf-8").strip()
                 if not line:
                     continue
-                if line.startswith("POS") or "," in line:
-                    print(f"[AGV] Position mottagen: {line}")
-                    client_sock.send((f"POS:{line}\n").encode("utf-8"))
+                if line.startswith("POS,"):
+                    parts = line.split(",")
+                    if len(parts) >= 3:
+                        x = parts[1]
+                        y = parts[2]
+                        client_sock.send(f"POS:{x},{y}\r\n".encode("utf-8"))
+                        
+                        print(f"[AGV] Skickar: POS:{x},{y}")
+
     except Exception as e:
         print("[AGV] DWM-fel:", e)
+
 
 # === BLUETOOTH SERVER START ===
 COMMAND_FILE = "command.txt"
@@ -113,7 +129,7 @@ server_sock.bind(("", bluetooth.PORT_ANY))
 server_sock.listen(1)
 
 port = server_sock.getsockname()[1]
-print(f"[AGV] Bluetooth-server startad på port {port}. Väntar på anslutning...")
+print(f"[AGV] Bluetooth-server startad pÃ¥ port {port}. VÃ¤ntar pÃ¥ anslutning...")
 
 try:
     while True:
@@ -140,7 +156,7 @@ try:
                     if line.startswith("goto"):
                         coords = line.replace("goto,", "").split(",")
                         x, y = coords if len(coords) == 2 else ("0", "0")
-                        print(f"[AGV] Utför: x={x}, y={y}")
+                        print(f"[AGV] UtfÃ¶r: x={x}, y={y}")
                         time.sleep(1.0)
 
                         with open(COMMAND_FILE, "a") as f:
@@ -156,8 +172,8 @@ try:
                         threading.Thread(target=lidar_task, args=(client_sock,), daemon=True).start()
 
                     elif line == "stop":
-                        global lidar_active
-                        print("[AGV] Mottog STOP från klient – stänger av LIDAR...")
+                        lidar_active
+                        print("[AGV] Mottog STOP frÃ¥n klient â€ stÃ¤nger av LIDAR...")
                         lidar_active = False
 
                     elif line == "position":
@@ -171,7 +187,7 @@ try:
 
         finally:
             client_sock.close()
-            print("[AGV] Väntar på ny anslutning...")
+            print("[AGV] VÃ¤ntar pÃ¥ ny anslutning...")
 
 except KeyboardInterrupt:
     print("[AGV] Avslutar Bluetooth-server...")
