@@ -6,6 +6,12 @@ import struct
 import threading
 import math
 import numpy as np
+from collections import deque
+import numpy as np
+
+# Buffertar för att hålla de senaste 5 mätningarna för varje vinkel (0-359)
+angle_buffers = [deque(maxlen=5) for _ in range(360)]
+
 
 
 # === LIDAR KONFIGURATION ===
@@ -27,33 +33,22 @@ def get_descriptor(ser):
     if descriptor[:2] != b'\xA5\x5A':
         raise Exception("Misslyckades med att ta emot scan descriptor")
         
-import serial
-import struct
-import math
-import threading
-import numpy as np
 
-# === LIDAR KONFIGURATION ===
-LIDAR_PORT = "/dev/ttyUSB0"
-LIDAR_BAUDRATE = 460800
-CMD_STOP = b'\xA5\x25'
-CMD_SCAN = b'\xA5\x20'
-check_angles = [i for i in range(0, 360, 1)]
+def update_angle_buffer(angle, distance):
+    """ Uppdatera bufferten för en given vinkel """
+    angle_buffers[angle].append(distance)
 
-lidar_active = False
-
-# === Filterinställningar ===
-MEDIAN_KERNEL_SIZE = 5
-
-def median_filter(data, kernel_size=MEDIAN_KERNEL_SIZE):
-    """ Applicera medianfilter för att reducera brus """
+def median_filter_across_scans():
+    """ Beräkna medianen av de senaste 5 mätningarna för varje vinkel """
     filtered = []
-    for i in range(len(data)):
-        start = max(0, i - kernel_size // 2)
-        end = min(len(data), i + kernel_size // 2 + 1)
-        median = np.median(data[start:end])
-        filtered.append(median)
+    for buffer in angle_buffers:
+        if len(buffer) > 0:
+            median = np.median(list(buffer))
+            filtered.append(median)
+        else:
+            filtered.append(0)  # Standardvärde om ingen data
     return filtered
+
 
 def parse_packet(packet):
     """ Tolka LIDAR-paket """
@@ -85,9 +80,6 @@ def lidar_task(client_sock):
             ser.write(CMD_STOP)
             ser.write(CMD_SCAN)
 
-            temp_array = [0] * len(check_angles)
-            current_index = 0
-
             while lidar_active:
                 packet = ser.read(5)
                 if len(packet) != 5:
@@ -101,10 +93,11 @@ def lidar_task(client_sock):
                 angle_rounded = round(angle)
 
                 if 0 <= angle_rounded < 360:
-                    temp_array[angle_rounded] = distance_cm
+                    # Uppdatera bufferten för aktuell vinkel
+                    update_angle_buffer(angle_rounded, distance_cm)
 
-                # Använd medianfilter på data
-                filtered_data = median_filter(temp_array)
+                # Ta medianen av de senaste 5 skanningarna för varje vinkel
+                filtered_data = median_filter_across_scans()
 
                 # Skicka filtrerad data som en sträng
                 lidar_string = "LIDAR:" + ",".join(map(str, map(int, filtered_data)))
@@ -119,8 +112,6 @@ def lidar_task(client_sock):
             print("[AGV] LIDAR stoppad.")
         except:
             pass
-
-
 
 def dwm_position_task(client_sock):
     try:
@@ -217,7 +208,7 @@ server_sock.bind(("", bluetooth.PORT_ANY))
 server_sock.listen(1)
 
 port = server_sock.getsockname()[1]
-print(f"[AGV] Bluetooth-server startad pÃ¥ port {port}. VÃ¤ntar pÃ¥ anslutning...")
+print(f"[AGV] Bluetooth-server startad på port {port}. VÃ¤ntar på anslutning...")
 
 try:
     while True:
@@ -272,7 +263,7 @@ try:
 
                     elif line == "stop":
                         lidar_active
-                        print("[AGV] Mottog STOP frÃ¥n klient â€ stÃ¤nger av LIDAR...")
+                        print("[AGV] Mottog STOP från klient är stänger av LIDAR...")
                         lidar_active = False
 
                     elif line == "position":
@@ -286,7 +277,7 @@ try:
 
         finally:
             client_sock.close()
-            print("[AGV] VÃ¤ntar pÃ¥ ny anslutning...")
+            print("[AGV] Väntar på ny anslutning...")
 
 except KeyboardInterrupt:
     print("[AGV] Avslutar Bluetooth-server...")
