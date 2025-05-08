@@ -27,16 +27,36 @@ def get_descriptor(ser):
     if descriptor[:2] != b'\xA5\x5A':
         raise Exception("Misslyckades med att ta emot scan descriptor")
         
-def median_filter(data, window_size=5):
-    """Filtrerar brus genom att annda ett medianfilter"""
-    filtered = np.copy(data)
+import serial
+import struct
+import math
+import threading
+import numpy as np
+
+# === LIDAR KONFIGURATION ===
+LIDAR_PORT = "/dev/ttyUSB0"
+LIDAR_BAUDRATE = 460800
+CMD_STOP = b'\xA5\x25'
+CMD_SCAN = b'\xA5\x20'
+check_angles = [i for i in range(0, 360, 1)]
+
+lidar_active = False
+
+# === Filterinställningar ===
+MEDIAN_KERNEL_SIZE = 5
+
+def median_filter(data, kernel_size=MEDIAN_KERNEL_SIZE):
+    """ Applicera medianfilter för att reducera brus """
+    filtered = []
     for i in range(len(data)):
-        start = max(0, i - window_size // 2)
-        end = min(len(data), i + window_size // 2 + 1)
-        filtered[i] = np.median(data[start:end])
+        start = max(0, i - kernel_size // 2)
+        end = min(len(data), i + kernel_size // 2 + 1)
+        median = np.median(data[start:end])
+        filtered.append(median)
     return filtered
 
 def parse_packet(packet):
+    """ Tolka LIDAR-paket """
     if len(packet) != 5:
         return None
     b0, b1, b2, b3, b4 = struct.unpack('<BBBBB', packet)
@@ -50,6 +70,11 @@ def parse_packet(packet):
     angle = angle_q6 / 64.0
     dist_q2 = (b4 << 8) | b3
     distance_cm = round((dist_q2 / 4.0) / 10.0)
+
+    # Säkerställ att distansen är positiv
+    if distance_cm < 0:
+        distance_cm = 0
+
     return angle, distance_cm, quality
 
 def lidar_task(client_sock):
@@ -58,10 +83,7 @@ def lidar_task(client_sock):
     try:
         with serial.Serial(LIDAR_PORT, LIDAR_BAUDRATE, timeout=1) as ser:
             ser.write(CMD_STOP)
-            time.sleep(0.1)
-            ser.reset_input_buffer()
             ser.write(CMD_SCAN)
-            get_descriptor(ser)
 
             temp_array = [0] * len(check_angles)
             current_index = 0
@@ -77,30 +99,27 @@ def lidar_task(client_sock):
 
                 angle, distance_cm, _ = result
                 angle_rounded = round(angle)
-                target_angle = check_angles[current_index]
 
-                if abs(angle_rounded - target_angle) <= 1:
-                    temp_array[current_index] = round(distance_cm, 1)
-                    current_index += 1
+                if 0 <= angle_rounded < 360:
+                    temp_array[angle_rounded] = distance_cm
 
-                    if current_index >= len(check_angles):
-                        current_index = 0
-                        
-                        filtered_data = median_filter(temp_array, window_size=5)
-                        lidar_string = "LIDAR:" + ",".join(map(str, filtered_data))
-                        client_sock.send((lidar_string + "\n").encode("utf-8"))
-                        print("[AGV] Skickar (filtrerat):", lidar_string)
+                # Använd medianfilter på data
+                filtered_data = median_filter(temp_array)
+
+                # Skicka filtrerad data som en sträng
+                lidar_string = "LIDAR:" + ",".join(map(str, map(int, filtered_data)))
+                client_sock.send((lidar_string + "\n").encode("utf-8"))
+                print(f"[AGV] Skickar: {lidar_string}")
 
     except Exception as e:
         print("[AGV] LIDAR-fel:", e)
-
     finally:
         try:
             ser.write(CMD_STOP)
-            time.sleep(0.1)
             print("[AGV] LIDAR stoppad.")
         except:
             pass
+
 
 
 def dwm_position_task(client_sock):
