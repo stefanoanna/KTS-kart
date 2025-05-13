@@ -9,8 +9,10 @@ import numpy as np
 from collections import deque
 import numpy as np
 
-# Buffertar fÃ¶r att hÃ¥lla de senaste 5 mÃ¤tningarna fÃ¶r varje vinkel (0-359)
-angle_buffers = [deque(maxlen=5) for _ in range(360)]
+from collections import deque
+
+position_buffer_x = deque(maxlen=5)
+position_buffer_y = deque(maxlen=5)
 
 
 
@@ -34,22 +36,7 @@ def get_descriptor(ser):
     descriptor = ser.read(7)
     if descriptor[:2] != b'\xA5\x5A':
         raise Exception("Misslyckades med att ta emot scan descriptor")
-        
 
-def update_angle_buffer(angle, distance):
-    """ Uppdatera bufferten fÃ¶r en given vinkel """
-    angle_buffers[angle].append(distance)
-
-def median_filter_across_scans():
-    """ BerÃ¤kna medianen av de senaste 5 mÃ¤tningarna fÃ¶r varje vinkel """
-    filtered = []
-    for buffer in angle_buffers:
-        if len(buffer) > 0:
-            median = np.median(list(buffer))
-            filtered.append(median)
-        else:
-            filtered.append(0)  # StandardvÃ¤rde om ingen data
-    return filtered
 
 
 def parse_packet(packet):
@@ -151,6 +138,8 @@ def dwm_position_task(client_sock):
 
             print("[AGV] DWM-positionering startad.")
 
+            counter = 0  
+
             while True:
                 line = ser.readline().decode("utf-8").strip()
                 if not line:
@@ -158,11 +147,12 @@ def dwm_position_task(client_sock):
                 if line.startswith("POS,"):
                     parts = line.split(",")
                     if len(parts) >= 3:
-                        x = round(float(parts[1])*100.0)
-                        y = round(float(parts[2])*100.0)
-                        
+                        x = float(parts[1]) * 100.0
+                        y = float(parts[2]) * 100.0
+                            
                         client_sock.send(f"POS:{x},{y}\r\n".encode("utf-8"))
-                        print(f"[AGV] Skickar: POS:{x},{y}")
+                        print(f"[AGV] Skickar filtrerad position: POS:{x},{y}")
+
     except Exception as e:
         print("[AGV] DWM-fel:", e)
 
@@ -170,78 +160,53 @@ def dwm_position_task(client_sock):
 
 
 
-	
-def emergency_stop(esp_serial):
-    """ Skickar ndstoppskommando till ESP """
-    try:
-        print("[AGV] Ndstoppskommando skickas till ESP (kommando 9).")
-        esp_serial.write(bytes([9]))
-    except Exception as e:
-        print(f"[AGV] Fel vid ndstoppskommando: {e}")
-
 
 # === ESP commands ==============
-def send_move_commands(esp_serial, current_x, current_y, target_x, target_y, angle):
+def send_move_commands(esp_serial, target_x, target_y, angle):
     try:
-        current_x = float(current_x)
-        current_y = float(current_y)
         target_x = float(target_x)
         target_y = float(target_y)
         angle = float(angle)
     except ValueError as e:
         print(f"[AGV] Fel vid konvertering av koordinater: {e}")
         return
-    dx = target_x - current_x
-    dy = target_y - current_y
-    print(target_x)
-    print("      ", target_y)
-    print("      ", current_x)
-    print("      ", current_y)
 
-    if abs(dx) <= 1 and abs(dy) <= 1:
-        print(f"[AGV] NÃ¥ra mÃ¥let: dx={dx}, dy={dy}, skickar kommando 9 (stopp)")
-        esp_serial.write(bytes([9]))
-        return
-
+    dx = target_x - x
+    dy = target_y - y
+    
     if angle == 0:
-        print(f"[AGV] Vinkel: {angle}, skickar kommando 0")
-        esp_serial.write(bytes([0]))
+		esp_serial.write(b'0')
     elif angle == 45:
-        print(f"[AGV] Vinkel: {angle}, skickar kommando 2")
-        esp_serial.write(bytes([2]))
+		esp_serial.write(b'2')
     elif angle == 90:
-        print(f"[AGV] Vinkel: {angle}, skickar kommando 3")
-        esp_serial.write(bytes([3]))
+		esp_serial.write(b'3')
     elif angle == 135:
-        print(f"[AGV] Vinkel: {angle}, skickar kommando 4")
-        esp_serial.write(bytes([4]))
+		esp_serial.write(b'4')
     elif angle == 180 or angle == -180:
-        print(f"[AGV] Vinkel: {angle}, skickar kommando 5")
-        esp_serial.write(bytes([5]))
+		esp_serial.write(b'5')
     elif angle == -45:
-        print(f"[AGV] Vinkel: {angle}, skickar kommando 6")
-        esp_serial.write(bytes([6]))
+		esp_serial.write(b'6')
     elif angle == -90:
-        print(f"[AGV] Vinkel: {angle}, skickar kommando 7")
-        esp_serial.write(bytes([7]))
+		esp_serial.write(b'7')
     elif angle == -135:
-        print(f"[AGV] Vinkel: {angle}, skickar kommando 8")
-        esp_serial.write(bytes([8]))
+		esp_serial.write(b'8')
     else:
-        print(f"[AGV] OkÃ¤nd vinkel: {angle}, skickar kommando 0")
-        esp_serial.write(bytes([9]))
+		esp_serial.write(b'9')
 
-    while abs(dx) > 5 or abs(dy) > 5:
-        print(f"[AGV] FortsÃ¤tter rÃ¶relse: dx={dx}, dy={dy}")
-        esp_serial.write(bytes([0]))
-        time.sleep(0.1)  # Kort paus mellan kommandon
+	while abs(dx) > 10 and abs(dy) > 10:
+		time.sleep(1)
+		esp_serial.write(b'0')
+		dx = target_x - x
+		dy = target_y - y
 
-        dx = target_x - current_x
-        dy = target_y - current_y
+    if abs(dx) <= 10 and abs(dy) <= 10:
+        print(f"[AGV] Nra mlet: dx={dx}, dy={dy}, skickar kommando 9 (stopp)")
+        esp_serial.write(b'9')
+        print(f"[AGV] Mlet ntt: dx={dx}, dy={dy}, skickar kommando 9")
+        return        
 
-    print(f"[AGV] MÃ¥let nÃ¥tt: dx={dx}, dy={dy}, skickar kommando 9")
-    esp_serial.write(bytes([9]))
 
+    
 
 
 # === BLUETOOTH SERVER START ===
@@ -282,7 +247,6 @@ try:
                         target_y = float(target_y)
                         angle = float(V)
                         
-                        
                         send_move_commands(esp_serial, x, y, target_x, target_y, angle)
                         print(f"[AGV] UtfÃÂ¶r: x={x}, y={y}")
                         time.sleep(1.0)
@@ -299,7 +263,7 @@ try:
                         print("[AGV] Initierar LIDAR-stream...")
                         threading.Thread(target=lidar_task, args=(client_sock,), daemon=True).start()
 
-                    elif line == "stop":
+                    elif line == "STOP":
                         emergency_stop(esp_serial)
                         print("[AGV] Mottog STOP frÃ¥n klient stÃ¤nger av LIDAR...")
                         
