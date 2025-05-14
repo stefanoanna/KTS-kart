@@ -8,6 +8,16 @@ import math
 import numpy as np
 from collections import deque
 import numpy as np
+from collections import deque
+import time
+
+position_buffer_x = deque(maxlen=5)  
+position_buffer_y = deque(maxlen=5)
+
+JUMP_THRESHOLD = 30
+SMOOTHING_FACTOR = 0.2  
+
+x, y = 0.0, 0.0
 
 from collections import deque
 
@@ -25,8 +35,6 @@ check_angles = [i for i in range(0, 360, 1)]
 
 lidar_active = False
 
-x = 0.0
-y = 0.0
 
 # === ESP32 ==============
 
@@ -113,7 +121,26 @@ def lidar_task(client_sock):
 
 
 
+def stabilize_position(new_x, new_y):
+    global x, y
+    
+    if x == 0.0 and y == 0.0:
+        x, y = new_x, new_y
+        return round(x), round(y)
+    
+    dx = new_x - x
+    dy = new_y - y
+    distance = (dx**2 + dy**2)**0.5
 
+    if distance > JUMP_THRESHOLD:
+        print(f"? Ignorerar hopp: {distance:.2f} cm")
+        return x, y
+
+    # Glidande justering mot den nya positionen
+    x = x + SMOOTHING_FACTOR * dx
+    y = y + SMOOTHING_FACTOR * dy
+
+    return round(x), round(y)
 
 
 
@@ -138,8 +165,6 @@ def dwm_position_task(client_sock):
 
             print("[AGV] DWM-positionering startad.")
 
-            counter = 0  
-
             while True:
                 line = ser.readline().decode("utf-8").strip()
                 if not line:
@@ -147,12 +172,14 @@ def dwm_position_task(client_sock):
                 if line.startswith("POS,"):
                     parts = line.split(",")
                     if len(parts) >= 3:
-                        x = float(parts[1]) * 100.0
-                        y = float(parts[2]) * 100.0
-                            
-                        client_sock.send(f"POS:{x},{y}\r\n".encode("utf-8"))
-                        print(f"[AGV] Skickar filtrerad position: POS:{x},{y}")
+                        raw_x = float(parts[1]) * 100.0
+                        raw_y = float(parts[2]) * 100.0
 
+                        # Stabiliserad position
+                        x, y = stabilize_position(raw_x, raw_y)
+
+                        client_sock.send(f"POS:{x},{y}\r\n".encode("utf-8"))
+                        print(f"[AGV] Skickar stabiliserad position: POS:{x},{y}")
     except Exception as e:
         print("[AGV] DWM-fel:", e)
 
@@ -162,6 +189,7 @@ def dwm_position_task(client_sock):
 
 
 # === ESP commands ==============
+# === ESP commands ==============
 def send_move_commands(esp_serial, target_x, target_y, angle):
     try:
         target_x = float(target_x)
@@ -170,40 +198,46 @@ def send_move_commands(esp_serial, target_x, target_y, angle):
     except ValueError as e:
         print(f"[AGV] Fel vid konvertering av koordinater: {e}")
         return
-
+        if line == "STOP":
+		       esp_serial.write(b'9')
+		       print("Raspberry stopp mottaget")
     dx = target_x - x
     dy = target_y - y
     
+
     if angle == 0:
-		esp_serial.write(b'0')
+        esp_serial.write(b'0')
     elif angle == 45:
-		esp_serial.write(b'2')
+        esp_serial.write(b'2')
     elif angle == 90:
-		esp_serial.write(b'3')
+        esp_serial.write(b'3')
     elif angle == 135:
-		esp_serial.write(b'4')
+        esp_serial.write(b'4')
     elif angle == 180 or angle == -180:
-		esp_serial.write(b'5')
+        esp_serial.write(b'5')
     elif angle == -45:
-		esp_serial.write(b'6')
+        esp_serial.write(b'6')
     elif angle == -90:
-		esp_serial.write(b'7')
+        esp_serial.write(b'7')
     elif angle == -135:
-		esp_serial.write(b'8')
+        esp_serial.write(b'8')
     else:
-		esp_serial.write(b'9')
+        esp_serial.write(b'9')
 
-	while abs(dx) > 10 and abs(dy) > 10:
-		time.sleep(1)
-		esp_serial.write(b'0')
-		dx = target_x - x
-		dy = target_y - y
+    while abs(dx) > 10 or abs(dy) > 10:
+        print(f"[AGV] Fortstter rrelse: dx={dx}, dy={dy}")
+        time.sleep(1)
+        esp_serial.write(b'0')  
+        dx = target_x - x
+        dy = target_y - y
+        time.sleep(5)
 
-    if abs(dx) <= 10 and abs(dy) <= 10:
+    if abs(dx) <= 3 and abs(dy) <= 3:
         print(f"[AGV] Nra mlet: dx={dx}, dy={dy}, skickar kommando 9 (stopp)")
         esp_serial.write(b'9')
         print(f"[AGV] Mlet ntt: dx={dx}, dy={dy}, skickar kommando 9")
-        return        
+        return
+        
 
 
     
@@ -220,9 +254,11 @@ print(f"[AGV] Bluetooth-server startad pÃ¥ port {port}. VÃÂ¤ntar pÃ¥ an
 
 try:
     while True:
+		
         client_sock, client_info = server_sock.accept()
         print(f"[AGV] Klient ansluten: {client_info}")
         data_buffer = ""
+        
 
         try:
             while True:
@@ -247,7 +283,7 @@ try:
                         target_y = float(target_y)
                         angle = float(V)
                         
-                        send_move_commands(esp_serial, x, y, target_x, target_y, angle)
+                        send_move_commands(esp_serial, target_x, target_y, angle)
                         print(f"[AGV] UtfÃÂ¶r: x={x}, y={y}")
                         time.sleep(1.0)
 
@@ -264,7 +300,7 @@ try:
                         threading.Thread(target=lidar_task, args=(client_sock,), daemon=True).start()
 
                     elif line == "STOP":
-                        emergency_stop(esp_serial)
+                        esp_serial.write(b'9')
                         print("[AGV] Mottog STOP frÃ¥n klient stÃ¤nger av LIDAR...")
                         
 
