@@ -1,88 +1,109 @@
 #include <Wire.h>
 #include <MPU9250_asukiaaa.h>
 
-#define RXD2 16  // ESP32 RX (connect to Pi TX)
-#define TXD2 17  // ESP32 TX (connect to Pi RX)
-
 MPU9250_asukiaaa mySensor;
 
-// Komplementärt filterkonstant
-const float alpha = 0.98;
-float heading = 0.0;
-unsigned long lastTime = 0;
-
-// Kalibrering
+// Offset- och kalibreringsvärden
+float gyroX_offset = 0.0;
+float gyroY_offset = 0.0;
 float gyroZ_offset = 0.0;
 float magX_offset = 0.0;
 float magY_offset = 0.0;
 float magX_scale = 1.0;
 float magY_scale = 1.0;
 
+float heading = 0.0;
+float alpha = 0.98;  // Kalman/komplementärt filter faktor
+
+unsigned long lastTime = 0;
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(21, 22); // SDA, SCL
+  mySensor.setWire(&Wire);
+  mySensor.beginAccel();
+  mySensor.beginGyro();
+  mySensor.beginMag();
+
+  delay(500);
+  calibrateGyro();
+  calibrateCompass();
+  lastTime = millis();
+
+  Serial.println("✅ ESP32 och MPU-9150 redo!");
+}
+
+void loop() {
+  updateHeading();
+  delay(100);
+}
+
+// === Kalibrering av Gyro ===
 void calibrateGyro() {
-  Serial.println("Kalibrerar gyro... håll sensorn stilla!");
-  float gzSum = 0.0;
+  Serial.println("Kalibrerar gyro... håll still!");
+  float gx = 0.0, gy = 0.0, gz = 0.0;
   const int samples = 100;
 
   for (int i = 0; i < samples; i++) {
     mySensor.gyroUpdate();
-    gzSum += mySensor.gyroZ();
+    gx += mySensor.gyroX();
+    gy += mySensor.gyroY();
+    gz += mySensor.gyroZ();
     delay(10);
   }
 
-  gyroZ_offset = gzSum / samples;
-  Serial.println("Gyro-kalibrering klar!");
-  Serial.print("Gyro Z-offset: ");
-  Serial.println(gyroZ_offset);
+  gyroX_offset = gx / samples;
+  gyroY_offset = gy / samples;
+  gyroZ_offset = gz / samples;
+
+  Serial.println("✅ Gyro kalibrerat!");
 }
 
-void calibrateMag() {
-  float magX_min = 32767, magX_max = -32768;
-  float magY_min = 32767, magY_max = -32768;
-
-  Serial.println("Kalibrerar magnetometer... rotera AGV:n långsamt i alla riktningar.");
+// === Kalibrering av Kompass ===
+void calibrateCompass() {
+  Serial.println("Kalibrerar kompass... rotera i en 8:a");
+  float x_min = 32767, x_max = -32767;
+  float y_min = 32767, y_max = -32767;
   unsigned long startTime = millis();
 
-  while (millis() - startTime < 8000) {  // 8 sekunder
+  while (millis() - startTime < 10000) {
     mySensor.magUpdate();
     float mx = mySensor.magX();
     float my = mySensor.magY();
 
-    magX_min = min(magX_min, mx);
-    magX_max = max(magX_max, mx);
-    magY_min = min(magY_min, my);
-    magY_max = max(magY_max, my);
+    if (mx < x_min) x_min = mx;
+    if (mx > x_max) x_max = mx;
+    if (my < y_min) y_min = my;
+    if (my > y_max) y_max = my;
 
     delay(50);
   }
 
-  // Beräkna offset och skala
-  magX_offset = (magX_max + magX_min) / 2;
-  magY_offset = (magY_max + magY_min) / 2;
+  magX_offset = (x_max + x_min) / 2;
+  magY_offset = (y_max + y_min) / 2;
+  magX_scale = (x_max - x_min) / 2.0;
+  magY_scale = (y_max - y_min) / 2.0;
 
-  float magX_range = (magX_max - magX_min) / 2;
-  float magY_range = (magY_max - magY_min) / 2;
-
-  magX_scale = magY_range / magX_range;
-  magY_scale = magX_range / magY_range;
-
-  Serial.println("Magnetometer kalibrering klar!");
-  Serial.print("MagX offset: "); Serial.println(magX_offset);
-  Serial.print("MagY offset: "); Serial.println(magY_offset);
-  Serial.print("MagX scale: "); Serial.println(magX_scale);
-  Serial.print("MagY scale: "); Serial.println(magY_scale);
+  Serial.println("✅ Kompass kalibrerad!");
+  Serial.print("Mag X offset: "); Serial.println(magX_offset);
+  Serial.print("Mag Y offset: "); Serial.println(magY_offset);
 }
 
-// Få kalibrerad kompassvinkel
+// === Beräkna Kalibrerad Kompassvinkel ===
 float getCalibratedHeading(float mx, float my) {
   // Korrigera offset och skala
-  float mx_corr = (mx - magX_offset) * magX_scale;
-  float my_corr = (my - magY_offset) * magY_scale;
+  float mx_corr = (mx - magX_offset) / magX_scale;
+  float my_corr = (my - magY_offset) / magY_scale;
 
+  // Beräkna kompassvinkel och invertera om riktningen är fel
   float heading = atan2(my_corr, mx_corr) * 180 / PI;
+  heading = -heading;
+
   if (heading < 0) heading += 360;
   return heading;
 }
 
+// === Uppdatera Vinkeln ===
 void updateHeading() {
   mySensor.gyroUpdate();
   mySensor.magUpdate();
@@ -96,38 +117,20 @@ void updateHeading() {
   lastTime = currentTime;
 
   float gyroDelta = gz * deltaTime;
+
+  // Få kompassens riktning
   float compassHeading = getCalibratedHeading(mx, my);
 
+  // Komplementärt filter för stabilisering
   heading = alpha * (heading + gyroDelta) + (1 - alpha) * compassHeading;
 
+  // Normalisera vinkeln till [0, 360)
   if (heading < 0) heading += 360;
   if (heading >= 360) heading -= 360;
 
+  // Skriva ut vinkel
   Serial.print("Vinkel: ");
   Serial.println(heading);
   Serial2.print("ANGLE:");
   Serial2.println(heading);
-}
-
-void setup() {
-  Serial.begin(115200);
-  Serial2.begin(115200, SERIAL_8N1, RXD2, TXD2);
-  Wire.begin(21, 22);  // SDA, SCL
-
-  mySensor.setWire(&Wire);
-  mySensor.beginAccel();
-  mySensor.beginGyro();
-  mySensor.beginMag();
-  delay(500);
-
-  calibrateGyro();
-  calibrateMag();
-
-  Serial.println("MPU-9150 klar för användning!");
-  lastTime = millis();
-}
-
-void loop() {
-  updateHeading();
-  delay(50);  // Uppdatera var 50 ms
 }
