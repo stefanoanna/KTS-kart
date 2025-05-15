@@ -1,0 +1,102 @@
+// ESP32 Motor Control with Battery Compensation
+#include <driver/ledc.h>
+#include <Wire.h>
+#include <MPU9250_asukiaaa.h>
+
+// Gyro acc
+MPU9250_asukiaaa mySensor;
+
+// Battery measurement
+#define BATTERY_PIN 34
+#define R1 18000.0
+#define R2 10000.0
+#define ADC_RESOLUTION 4095.0
+
+// Motors R
+const int pwmPinRF = 18;
+const int pwmPinRB = 19;
+const int pwmChannelA = 0;
+const int pwmChannelB = 1;
+
+// Motors L
+const int pwmPinLF = 32;
+const int pwmPinLB = 33;
+const int pwmChannelC = 2;
+const int pwmChannelD = 3;
+
+// UART
+#define RXD2 16
+#define TXD2 17
+
+const int pwmFreq = 5000;
+const int pwmResolution = 8;
+
+void setup() {
+    Serial.begin(115200);
+    Serial2.begin(115200, SERIAL_8N1, RXD2, TXD2);
+    Wire.begin(21, 22);
+
+    pinMode(pwmPinRF, OUTPUT);
+    pinMode(pwmPinRB, OUTPUT);
+    pinMode(pwmPinLF, OUTPUT);
+    pinMode(pwmPinLB, OUTPUT);
+
+    ledcSetup(pwmChannelA, pwmFreq, pwmResolution);
+    ledcSetup(pwmChannelB, pwmFreq, pwmResolution);
+    ledcSetup(pwmChannelC, pwmFreq, pwmResolution);
+    ledcSetup(pwmChannelD, pwmFreq, pwmResolution);
+
+    ledcAttachPin(pwmPinRF, pwmChannelA);
+    ledcAttachPin(pwmPinRB, pwmChannelB);
+    ledcAttachPin(pwmPinLF, pwmChannelC);
+    ledcAttachPin(pwmPinLB, pwmChannelD);
+
+    Serial.println("ESP32 ready. Waiting for commands...");
+}
+
+float readBatteryVoltage() {
+    int adcValue = analogRead(BATTERY_PIN);
+    float voltage = (adcValue / ADC_RESOLUTION) * 3.3;
+    voltage = voltage * ((R1 + R2) / R2);
+    return voltage;
+}
+
+int adjustPWM(int basePWM) {
+    float batteryVoltage = readBatteryVoltage();
+    float pwmFactor = 8.22 / batteryVoltage;
+    int adjustedPWM = int(basePWM * pwmFactor);
+    return min(adjustedPWM, 255);
+}
+
+void forwardR() {
+    int pwmValue = adjustPWM(74);
+    ledcWrite(pwmChannelA, pwmValue);
+    ledcWrite(pwmChannelB, 0);
+}
+
+void backwardR() {
+    int pwmValue = adjustPWM(147);
+    ledcWrite(pwmChannelB, pwmValue);
+    ledcWrite(pwmChannelA, 0);
+}
+
+void forwardL() {
+    int pwmValue = adjustPWM(75);
+    ledcWrite(pwmChannelC, pwmValue);
+    ledcWrite(pwmChannelD, 0);
+}
+
+void backwardL() {
+    int pwmValue = adjustPWM(146);
+    ledcWrite(pwmChannelD, pwmValue);
+    ledcWrite(pwmChannelC, 0);
+}
+
+void loop() {
+    forwardR();
+    forwardL();
+    delay(1000);
+    backwardR();
+    backwardL();
+    delay(1000);
+}
