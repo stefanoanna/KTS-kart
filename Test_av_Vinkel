@@ -1,0 +1,96 @@
+#include <Wire.h>
+#include <MPU9250_asukiaaa.h>
+
+#define RXD2 16  // ESP32 RX (connect to Pi TX)
+#define TXD2 17  // ESP32 TX (connect to Pi RX)
+
+MPU9250_asukiaaa mySensor;
+
+// Filterkonstanter
+const float alpha = 0.98;  // Komplementärt filterkonstant
+float heading = 0.0;       // Huvudriktning (vinkel)
+float lastTime = 0.0;
+
+// Offset för gyro
+float gyroZ_offset = 0.0;
+
+// Kalibrering
+void calibrateGyro() {
+  Serial.println("Kalibrerar gyro... håll sensorn stilla!");
+  float gz = 0.0;
+  const int samples = 100;
+
+  for (int i = 0; i < samples; i++) {
+    mySensor.gyroUpdate();
+    gz += mySensor.gyroZ();
+    delay(10);
+  }
+
+  gyroZ_offset = gz / samples;
+  Serial.println("Gyro-kalibrering klar!");
+  Serial.print("Offset Z: "); Serial.println(gyroZ_offset);
+}
+
+// Initiering
+void setup() {
+  Serial.begin(115200);       // För USB-monitor
+  Serial2.begin(115200, SERIAL_8N1, RXD2, TXD2); // UART2 för Pi
+  Wire.begin(21, 22);         // SDA, SCL för ESP32 Feather
+
+  mySensor.setWire(&Wire);
+  mySensor.beginAccel();
+  mySensor.beginGyro();
+  mySensor.beginMag();
+
+  delay(500);
+  calibrateGyro();
+
+  Serial.println("MPU-9150 klar för användning!");
+  lastTime = millis();
+}
+
+// Få kompassvinkel (heading)
+float getCompassHeading(float mx, float my) {
+  float heading = atan2(my, mx) * 180 / PI;
+  if (heading < 0) heading += 360;
+  return heading;
+}
+
+// Uppdatera vinkel (gyro + kompass)
+void updateHeading() {
+  mySensor.gyroUpdate();
+  mySensor.magUpdate();
+
+  float gz = mySensor.gyroZ() - gyroZ_offset;
+  float mx = mySensor.magX();
+  float my = mySensor.magY();
+
+  float currentTime = millis();
+  float deltaTime = (currentTime - lastTime) / 1000.0;
+  lastTime = currentTime;
+
+  // Gyro-baserad vinkeluppdatering
+  float gyroDelta = gz * deltaTime;
+
+  // Kompassvinkel
+  float compassHeading = getCompassHeading(mx, my);
+
+  // Komplementärt filter
+  heading = alpha * (heading + gyroDelta) + (1 - alpha) * compassHeading;
+
+  // Justera vinkel till [0, 360]
+  if (heading < 0) heading += 360;
+  if (heading >= 360) heading -= 360;
+
+  Serial.print("Vinkel: ");
+  Serial.println(heading);
+
+  // Skicka vinkel till Raspberry Pi
+  Serial2.print("ANGLE:");
+  Serial2.println(heading);
+}
+
+void loop() {
+  updateHeading();
+  delay(50);  // Uppdateringsfrekvens
+}
