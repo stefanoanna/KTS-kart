@@ -259,6 +259,7 @@ for (int j = 0; j < ds.locations-1; j++) {
 
     dijkstra.execute(nodes.get(startnode));
 LinkedList<Vertex> path = dijkstra.getPath(nodes.get(endnode));
+ds.copypath = new LinkedList<> (path);
 
 if (path == null || path.isEmpty()) {
     System.out.println("❌ Ingen väg hittades från " + startnode + " till " + endnode);
@@ -276,34 +277,34 @@ for (int i = 0; i < path.size()-1; i++) {
     ds.ObstacleMatrix[ipos][jpos] = 3;
     
 }
-for (int i = 0; i < path.size()-1;) {
-    
-    int ipos1 = (int)(Integer.parseInt(path.get(i).getId()) / ds.columns);
+for (int i = 0; i < path.size() - 1;) {
+
+    int ipos1 = (int) (Integer.parseInt(path.get(i).getId()) / ds.columns);
     int jpos1 = Integer.parseInt(path.get(i).getId()) - ipos1 * ds.columns;
 
-    int ipos2 = (int)(Integer.parseInt(path.get(i+1).getId()) / ds.columns);
-    int jpos2 = Integer.parseInt(path.get(i+1).getId()) - ipos2 * ds.columns;
-    
+    int ipos2 = (int) (Integer.parseInt(path.get(i + 1).getId()) / ds.columns);
+    int jpos2 = Integer.parseInt(path.get(i + 1).getId()) - ipos2 * ds.columns;
+
     double directionV = 0.0;
     String direction = "";
-    
-   // Bestäm riktning
+
+    // Bestäm riktning
     if (ipos2 == ipos1 && jpos2 == jpos1 + 1) {
-        direction = "0"; directionV = 0;
+        direction = "0"; directionV = 0.0;
     } else if (ipos2 == ipos1 && jpos2 == jpos1 - 1) {
-        direction = "180"; directionV = 180;
+        direction = "180"; directionV = 180.0;
     } else if (jpos2 == jpos1 && ipos2 == ipos1 + 1) {
-        direction = "90"; directionV = 90;
+        direction = "90"; directionV = 90.0;
     } else if (jpos2 == jpos1 && ipos2 == ipos1 - 1) {
-        direction = "270"; directionV = 270;
+        direction = "270"; directionV = 270.0;
     } else if (ipos2 == ipos1 + 1 && jpos2 == jpos1 + 1) {
-        direction = "45"; directionV = 45;
+        direction = "45"; directionV = 45.0;
     } else if (ipos2 == ipos1 + 1 && jpos2 == jpos1 - 1) {
-        direction = "135"; directionV = 135;
+        direction = "135"; directionV = 135.0;
     } else if (ipos2 == ipos1 - 1 && jpos2 == jpos1 - 1) {
-        direction = "225"; directionV = 225;
+        direction = "225"; directionV = 225.0;
     } else if (ipos2 == ipos1 - 1 && jpos2 == jpos1 + 1) {
-        direction = "315"; directionV = 315;
+        direction = "315"; directionV = 315.0;
     }
 
     double rotation = calculateRotation(ds.agvDirection, directionV);
@@ -312,13 +313,36 @@ for (int i = 0; i < path.size()-1;) {
     int finalRow = ipos2;
     int finalCol = jpos2;
 
+    // Sammanhängande rörelse
+    int length = 1;
+    int nextIpos, nextJpos;
+    while (i + length < path.size()) {
+        nextIpos = (int) (Integer.parseInt(path.get(i + length).getId()) / ds.columns);
+        nextJpos = Integer.parseInt(path.get(i + length).getId()) - nextIpos * ds.columns;
+
+        // Kontrollera om riktningen ändras
+        if ((direction.equals("0") && nextJpos == jpos1 + length) ||
+            (direction.equals("180") && nextJpos == jpos1 - length) ||
+            (direction.equals("90") && nextIpos == ipos1 + length) ||
+            (direction.equals("270") && nextIpos == ipos1 - length) ||
+            (direction.equals("45") && nextIpos == ipos1 + length && nextJpos == jpos1 + length) ||
+            (direction.equals("135") && nextIpos == ipos1 + length && nextJpos == jpos1 - length) ||
+            (direction.equals("225") && nextIpos == ipos1 - length && nextJpos == jpos1 - length) ||
+            (direction.equals("315") && nextIpos == ipos1 - length && nextJpos == jpos1 + length)) {
+            finalRow = nextIpos;
+            finalCol = nextJpos;
+            length++;
+        } else {
+            break;
+        }
+    }
+
+    // Skicka kommandot till AGV:n med den sista noden i sträckan
     String command = "GT," + finalCol * ds.gridsize + "," + finalRow * ds.gridsize + "," + rotation;
     System.out.println("➡️ Skickar riktning: " + command);
-
-    // Skicka kommandot till AGV:n
     bt.sendDirection(command);
 
-    // Vänta tills AGV:n når målnoden (inom ±3 cm)
+    // Vänta tills AGV:n når målnoden (inom ±5 cm)
     boolean nodeReached = false;
     while (!nodeReached) {
         double currentX = ds.robotX;
@@ -327,14 +351,16 @@ for (int i = 0; i < path.size()-1;) {
         double distanceX = Math.abs((finalCol * ds.gridsize) - currentX);
         double distanceY = Math.abs((finalRow * ds.gridsize) - currentY);
 
-        if (distanceX <= 5 && distanceY <= 5) {
+        if (distanceX <= 10 && distanceY <= 10) {
             System.out.println("✅ Nått nod: (" + currentX + ", " + currentY + ")");
             nodeReached = true;
             break;
         }
-
-        // Vänta kort innan nästa kontroll
-       
+        try {
+            Thread.sleep(50);
+        } catch (InterruptedException e) {
+            System.out.println("⚠️ Väntan avbruten: " + e.getMessage());
+        }
     }
 
     // Markera noden som besökt
@@ -342,16 +368,20 @@ for (int i = 0; i < path.size()-1;) {
     int y = finalRow * ds.gridsize;
     for (int k = 0; k < ds.locations; k++) {
         if (ds.LocationX[k] == x && ds.LocationY[k] == y) {
+           // bt.sendLjusCommand(); LÄD OPTPLAN
+           // bt.waitForAck();
             System.out.println("✅ Markerar nod som besökt: (" + x + ", " + y + ")");
             ds.LocationX[k] = -1;
             ds.LocationY[k] = -1;
             break;
         }
     }
-
-    // Gå till nästa nod
-    i++;
+     
+    // Gå vidare till nästa nod
+    i += length;
 }
+
+
 
 
 
