@@ -1,0 +1,626 @@
+// Define pin and PWM parameters
+#include <driver/ledc.h> // Include the ESP32 PWM control library
+#include <Wire.h>
+#include <MPU9250_asukiaaa.h>
+
+// Gyro acc
+MPU9250_asukiaaa mySensor;
+
+// Offset för gyro
+float gyroX_offset = 0.0;
+float gyroY_offset = 0.0;
+float gyroZ_offset = 0.0;
+
+// Motors R
+const int pwmPinRF = 18;
+const int pwmPinRB = 19; // GPIO pin connected to H-bridge input
+const int pwmChannelA = 0;
+const int pwmChannelB = 1; // PWM channel (0-15 available on ESP32)
+
+// Motors L
+const int pwmPinLF = 32;
+const int pwmPinLB = 33; // GPIO pin connected to H-bridge input
+const int pwmChannelC = 2;
+const int pwmChannelD = 3; // PWM channel (0-15 available on ESP32)
+
+// UART
+#define RXD2 16 // ESP32 RX (connect to Pi TX)
+#define TXD2 17 // ESP32 TX (connect to Pi RX)
+
+const int pwmFreq = 5000; // Frequency in Hz
+const int pwmResolution = 8; // Resolution in bits (1-16)
+const int dutyCycle = 250; // For 8-bit resolution: 0-255
+
+// Batteri
+const int analogBatteryPin = 39; // GPIO39 = A3 på Huzzah32
+const float R1 = 18000.0; // 18 kΩ
+const float R2 = 6700.0;  // 6.8 kΩ
+
+// Relativ positionsberäkning
+float velocityX = 0, velocityY = 0;
+float posX = 0, posY = 0;
+unsigned long prevMillis = 0;
+
+
+void setup() {
+  Serial.begin(115200); // USB debug
+  Serial2.begin(115200, SERIAL_8N1, RXD2, TXD2); // UART2 for Pi
+  prevMillis = millis();
+
+  // Batteri
+
+  analogReadResolution(12); // 12-bit upplösning
+
+  pinMode(pwmPinRF, OUTPUT);
+  pinMode(pwmPinRB, OUTPUT);
+  pinMode(pwmPinLF, OUTPUT);
+  pinMode(pwmPinLB, OUTPUT);
+
+  // Configure PWM channels with `ledcSetup` first
+
+  ledcAttachChannel(pwmPinRF, pwmFreq, pwmResolution, pwmChannelA);
+  ledcAttachChannel(pwmPinRB, pwmFreq, pwmResolution, pwmChannelB);
+  ledcAttachChannel(pwmPinLF, pwmFreq, pwmResolution, pwmChannelC);
+  ledcAttachChannel(pwmPinLB, pwmFreq, pwmResolution, pwmChannelD);
+
+  stop(); // Ensure stopped at startup
+
+  delay(1000);
+  Serial.println("Initierar MPU-9150...");
+
+  Wire.begin(21, 22); // SDA, SCL för ESP32 Feather
+  mySensor.setWire(&Wire);
+  mySensor.beginAccel();
+  mySensor.beginGyro();
+
+  delay(500);
+  calibrateGyro(); // ← Kör kalibrering när sensorn ligger stilla
+
+  Serial.println("ESP32 ready. Waiting for commands...");
+}
+
+void loop() {
+  //motorer
+  if (Serial2.available()) {
+  char received = Serial2.read(); // ✅ FIXED: Read from Serial2
+  Serial.print("Received command: "); // Print to USB monitor
+  Serial.println(received); 
+
+
+  //Voltage 7.2
+  const int rotRT = 2400;
+  const int rotLT = 2420;
+
+  int rawADC = analogRead(analogBatteryPin);
+  float voltageAtPin = (rawADC / 4095.0) * 3.575;
+  float batteryVoltage = voltageAtPin * (R1 + R2) / R2;
+  float voltageRatio = 7.66 / batteryVoltage;
+
+  int n = 0;
+
+  if (received == '2'){ // 45 grader
+    n = 1;
+  }
+  else if (received == '3'){ // 90 grader
+    n = 2;
+  }
+  else if (received == '4'){ // 135 grader
+    n = 3;
+  }
+  else if (received == '5'){ // +-180 grader
+    n = 4;
+  }
+  else if (received == '6'){ // -45 grader
+    n = 1;
+  }
+  else if (received == '7'){ // -90 grader
+    n = 2;
+  }
+  else if (received == '8'){ // -135 grader
+    n = 3;
+  }
+
+  switch (received) {
+    case '0':
+      Forward();
+      Serial2.println("ACK: Forward");
+      n = 0;
+      break;
+
+    case '1':
+      Backward();
+      Serial2.println("ACK: Backward");
+      n = 0;
+      break;
+
+    case '2':
+      rotR();
+      delay(rotRT*voltageRatio*n/2);
+      Serial2.println("ACK: Rotate Right with 45 degrees");
+      stop();
+      n = 0;
+      break;
+
+    case '3':
+      rotR();
+      delay(rotRT*voltageRatio*n/2);
+      Serial2.println("ACK: Rotate Right with 90 degrees");
+      stop();
+      n = 0;
+      break;
+
+    case '4':
+      rotR();
+      delay(rotRT*voltageRatio*n/2);
+      Serial2.println("ACK: Rotate Right with 135 degrees");
+      stop();
+      n = 0;
+      break;
+
+    case '5':
+      rotL();
+      delay(rotLT*voltageRatio*n/2);
+      Serial2.println("ACK: Rotate Left with 180 degrees");
+      stop();
+      n = 0;
+      break;
+
+    case '6':
+      rotL();
+      delay(rotLT*voltageRatio*n/2);
+      Serial2.println("ACK: Rotate Left with 45 degrees");
+      stop();
+      n = 0;
+      break;
+
+    case '7':
+      rotL();
+      delay(rotLT*voltageRatio*n/2);
+      Serial2.println("ACK: Rotate Left with 90 degrees");
+      stop();
+      n = 0;
+      break;
+
+    case '8':
+      rotL();
+      delay(rotLT*voltageRatio*n/2);
+      Serial2.println("ACK: Rotate Left with 135 degrees");
+      stop();
+      n = 0;
+      break;
+
+    case '9':
+      stop();
+      Serial2.println("ACK: Stop");
+      n = 0;
+      break;
+
+    default:
+      stop();
+      Serial2.println("ACK: Unknown, Stopped");
+      Serial.print("Unknown command: ");
+      Serial.println(received);
+      break;
+    }
+  }
+  // Accelerometer mm
+  mySensor.accelUpdate();
+  mySensor.gyroUpdate();
+
+  // Accelerometer – du använder bara X och Y
+  float ax = mySensor.accelX();
+  float ay = mySensor.accelY();
+
+  // Korrigerade gyrovärden
+  float gx = mySensor.gyroX() - gyroX_offset;
+  float gy = mySensor.gyroY() - gyroY_offset;
+  float gz = mySensor.gyroZ() - gyroZ_offset;
+
+  // Beräkna tidsdifferens
+  unsigned long currentMillis = millis();
+  float dt = (currentMillis - prevMillis) / 1000.0;
+  prevMillis = currentMillis;
+  
+  // Beräkna relativ hastighet och position
+  float ax = mySensor.accelX() * 9.81;
+  float ay = mySensor.accelY() * 9.81;
+  
+  velocityX += ax * dt;
+  velocityY += ay * dt;
+  posX += velocityX * dt;
+  posY += velocityY * dt;
+  
+  // Skicka IMU och positionsdata till Raspberry Pi
+  Serial2.print("imu:");
+  Serial2.print(ax); Serial2.print(",");
+  Serial2.print(ay); Serial2.print(",");
+  Serial2.print(mySensor.gyroZ()); Serial2.print(",");
+  Serial2.print(posX); Serial2.print(",");
+  Serial2.println(posY);
+
+
+}
+
+// === Movement functions ===
+
+void Forward(){
+forwardR();
+forwardL();
+}
+
+void Backward(){
+backwardR();
+backwardL();
+}
+
+void rotR(){
+backwardR1();
+forwardL1();
+}
+
+void rotL(){
+forwardR1();
+backwardL1();
+}
+
+void stop(){
+ledcWrite(pwmPinRF, 0); // Stop motor by writing 0 to the PWM channel
+ledcWrite(pwmPinRB, 0);
+ledcWrite(pwmPinLF, 0);
+ledcWrite(pwmPinLB, 0);
+}
+
+
+void forwardR(){
+ledcWrite(pwmPinRF, 74); // Motor R Forward speed prev 120
+ledcWrite(pwmPinRB, 0); // Motor R Backward speed = 0
+}
+
+void backwardR(){
+ledcWrite(pwmPinRB, 147); // Motor R Backward speed
+ledcWrite(pwmPinRF, 0); // Motor R Forward speed = 0
+}
+
+void forwardL(){
+ledcWrite(pwmPinLF,75); // Motor L Forward speed
+ledcWrite(pwmPinLB, 0); // Motor L Backward speed = 0
+}
+
+void backwardL(){
+ledcWrite(pwmPinLB, 146); // Motor L Backward speed
+ledcWrite(pwmPinLF, 0); // Motor L Forward speed = 0
+}
+
+void forwardR1(){
+ledcWrite(pwmPinRF, 90); // Motor R Forward speed prev 40
+ledcWrite(pwmPinRB, 0); // Motor R Backward speed = 0
+}
+
+void backwardR1(){
+ledcWrite(pwmPinRB, 85); // Motor R Backward speed prev40
+ledcWrite(pwmPinRF, 0); // Motor R Forward speed = 0
+}
+
+void forwardL1(){
+ledcWrite(pwmPinLF, 85); // Motor L Forward speed prev 50
+ledcWrite(pwmPinLB, 0); // Motor L Backward speed = 0
+}
+
+void backwardL1(){
+ledcWrite(pwmPinLB, 75); // Motor L Backward speed prev 50
+ledcWrite(pwmPinLF, 0); // Motor L Forward speed = 0
+}
+//Gyro
+void calibrateGyro() {
+  Serial.println("Kalibrerar gyro... håll sensorn helt stilla!");
+  float gx = 0.0, gy = 0.0, gz = 0.0;
+  const int samples = 100;
+
+  for (int i = 0; i < samples; i++) {
+    mySensor.gyroUpdate();
+    gx += mySensor.gyroX();
+    gy += mySensor.gyroY();
+    gz += mySensor.gyroZ();
+    delay(10);
+  }
+
+  gyroX_offset = gx / samples;
+  gyroY_offset = gy / samples;
+  gyroZ_offset = gz / samples;
+
+  Serial.println("Gyro-kalibrering klar!");
+  Serial.print("Offset X: "); Serial.println(gyroX_offset);
+  Serial.print("Offset Y: "); Serial.println(gyroY_offset);
+  Serial.print("Offset Z: "); Serial.println(gyroZ_offset);
+}
+
+
+
+
+
+import bluetooth
+import time
+import os
+import serial
+import struct
+import threading
+import math
+import numpy as np
+import threading
+from collections import deque
+
+# === KONFIGURATION ===
+position_lock = threading.Lock()
+position_buffer_x = deque(maxlen=5)
+position_buffer_y = deque(maxlen=5)
+JUMP_THRESHOLD = 30
+SMOOTHING_FACTOR = 0.2
+x, y = 475.0, 190.0
+lidar_active = False
+LIDAR_PORT = "/dev/ttyUSB0"
+LIDAR_BAUDRATE = 460800
+CMD_STOP = b'\xA5\x25'
+CMD_SCAN = b'\xA5\x20'
+check_angles = [i for i in range(0, 360, 1)]
+esp_serial = serial.Serial('/dev/ttyS0', 115200, timeout=1)
+
+# Kalmanfilterkonfiguration
+kalman_x = {'x': 0.0, 'v': 0.0, 'P': np.eye(2) * 10}
+kalman_y = {'x': 0.0, 'v': 0.0, 'P': np.eye(2) * 10}
+Q = np.eye(2) * 0.1
+R_base = 25.0
+speed_factor = 3.0
+dt = 0.1
+
+def calculate_dynamic_R(speed):
+    return R_base + speed_factor * speed
+
+def kalman_predict(kalman_state, acc):
+    A = np.array([[1, dt], [0, 1]])
+    B = np.array([[0.5 * dt**2], [dt]])
+    x = np.array([[kalman_state['x']], [kalman_state['v']]])
+    u = np.array([[acc]])
+
+    x_pred = A @ x + B @ u
+    P_pred = A @ kalman_state['P'] @ A.T + Q
+    kalman_state['x'], kalman_state['v'] = x_pred.flatten()
+    kalman_state['P'] = P_pred
+    return kalman_state
+
+def kalman_update(kalman_state, measurement):
+    H = np.array([[1, 0]])
+    x = np.array([[kalman_state['x']], [kalman_state['v']]])
+    z = np.array([[measurement]])
+
+    speed = np.abs(kalman_state['v'])
+    R = calculate_dynamic_R(speed)
+    y = z - H @ x
+    S = H @ kalman_state['P'] @ H.T + R
+    K = kalman_state['P'] @ H.T @ np.linalg.inv(S)
+
+    x_new = x + K @ y
+    P_new = (np.eye(2) - K @ H) @ kalman_state['P']
+    kalman_state['x'], kalman_state['v'] = x_new.flatten()
+    kalman_state['P'] = P_new
+    return kalman_state
+
+    
+def get_descriptor(ser):
+    descriptor = ser.read(7)
+    if descriptor[:2] != b'\xA5\x5A':
+        raise Exception("Misslyckades med att ta emot scan descriptor")
+def update_position(new_x, new_y):
+    global x, y
+    with position_lock:
+        x, y = new_x, new_y
+        #print(f"[Position] Uppdaterad: x={x}, y={y}")
+def get_position():
+    global x, y
+    with position_lock:
+        return x, y
+def parse_packet(packet):
+    if len(packet) != 5:
+        return None
+    b0, b1, b2, b3, b4 = struct.unpack('<BBBBB', packet)
+    start_flag = b0 & 0x01
+    inverted_start_flag = (b0 >> 1) & 0x01
+    if start_flag != (~inverted_start_flag & 0x01):
+        return None
+    quality = b0 >> 2
+    angle_q6 = ((b2 << 7) | (b1 >> 1))
+    angle = (angle_q6 / 64.0) % 360
+    dist_q2 = (b4 << 8) | b3
+    distance_cm = round((dist_q2 / 4.0) / 10.0)
+    return angle, max(0, distance_cm), quality
+    
+def lidar_task(client_sock):
+    global lidar_active
+    lidar_active = True
+    try:
+        with serial.Serial(LIDAR_PORT, LIDAR_BAUDRATE, timeout=1) as ser:
+            ser.write(CMD_STOP)
+            time.sleep(0.1)
+            ser.reset_input_buffer()
+            ser.write(CMD_SCAN)
+            get_descriptor(ser)
+            temp_array = [0] * len(check_angles)
+            current_index = 0
+            while lidar_active:
+                packet = ser.read(5)
+                if len(packet) != 5:
+                    continue
+                result = parse_packet(packet)
+                if result is None:
+                    continue
+                angle, distance_cm, _ = result
+                angle_rounded = round(angle)
+                target_angle = check_angles[current_index]
+                if abs(angle_rounded - target_angle) <= 1:
+                    temp_array[current_index] = round(distance_cm, 1)
+                    current_index += 1
+                    if current_index >= len(check_angles):
+                        current_index = 0
+                        lidar_string = "LIDAR:" + ",".join(map(str, temp_array))
+                        client_sock.send((lidar_string + "\n").encode("utf-8"))
+          kalman_x = kalman_update(kalman_x, lidar_x)
+          kalman_y = kalman_update(kalman_y, lidar_y)
+          print(f"[Kalman LIDAR] x={kalman_x['x']:.2f}, y={kalman_y['x']:.2f}")
+
+    except Exception as e:
+        print("[AGV] LIDAR-fel:", e)
+    finally:
+        try:
+            ser.write(CMD_STOP)
+            time.sleep(0.1)
+        except:
+            pass
+            
+def dwm_position_task(client_sock):
+    global x, y
+    ax, ay = 0.0, 0.0
+
+    try:
+        with serial.Serial("/dev/ttyACM0", 115200, timeout=1) as ser:
+            ser.write(b"\r")
+            time.sleep(0.1)
+            ser.write(b"\r")
+            time.sleep(0.1)
+
+            start = time.time()
+            while time.time() - start < 2:
+                if ser.in_waiting:
+                    line = ser.readline().decode("utf-8").strip()
+                    if "dwm>" in line:
+                        break
+            ser.write(b'lep')
+            time.sleep(0.1)
+            ser.write(b"quit\r")
+            time.sleep(0.2)
+            ser.write(b"\r")
+            time.sleep(0.1)
+            ser.write(b"\r")
+            time.sleep(0.1)
+
+            time.sleep(0.1)
+            ser.write(b"lep\r")
+            time.sleep(0.2) 
+
+            print("[AGV] DWM-positionering startad.")
+
+            while True:
+                if esp_serial.in_waiting:
+                    esp_line = esp_serial.readline().decode().strip()
+                    if esp_line.startswith("mpu:"):
+                        try:
+                            parts = esp_line.replace("mpu:", "").split(",")
+                            ax = float(parts[0].split(":")[1])
+                            ay = float(parts[1].split(":")[1])
+                        except Exception as e:
+                            print("[Kalman] Fel vid parsing av MPU:", e)
+
+                kalman_x = kalman_predict(kalman_x, ax)
+                kalman_y = kalman_predict(kalman_y, ay)
+                
+                # UWB-uppdatering
+                if line.startswith("POS,"):
+                    parts = line.split(",")
+                    if len(parts) >= 3:
+                        raw_x = float(parts[1]) * 100.0
+                        raw_y = float(parts[2]) * 100.0
+                        kalman_x = kalman_update(kalman_x, raw_x)
+                        kalman_y = kalman_update(kalman_y, raw_y)
+                        print(f"[Kalman] x={kalman_x['x']:.2f}, y={kalman_y['x']:.2f}")
+
+    except Exception as e:
+        print("[AGV] DWM-fel:", e)
+        
+def send_move_commands(esp_serial, target_x, target_y, angle):
+    try:
+		
+        target_x = float(target_x)
+        target_y = float(target_y)
+        angle = float(angle)
+    except ValueError as e:
+        print(f"[AGV] Fel vid konvertering av koordinater: {e}")
+        return
+    current_x, current_y = get_position()
+    dx = target_x - current_x
+    dy = target_y - current_y
+    
+
+    if angle == 0:
+        esp_serial.write(b'0')
+    elif angle == 45:
+        esp_serial.write(b'2')
+    elif angle == 90:
+        esp_serial.write(b'3')
+    elif angle == 135:
+        esp_serial.write(b'4')
+    elif angle == 180 or angle == -180:
+        esp_serial.write(b'5')
+    elif angle == -45:
+        esp_serial.write(b'6')
+    elif angle == -90:
+        esp_serial.write(b'7')
+    elif angle == -135:
+        esp_serial.write(b'8')
+    else:
+        esp_serial.write(b'9')
+    
+    esp_serial.write(b'0')  
+    while abs(dx) > 10 and abs(dy) > 10:
+        current_x, current_y = get_position()
+        dx = target_x - current_x
+        dy = target_y - current_y
+        
+
+    if abs(dx) <= 10 and abs(dy) <= 10:
+        print(f"[AGV] Nra mlet: dx={dx}, dy={dy}, skickar kommando 9 (stopp)")
+        esp_serial.write(b'9')
+        print(f"[AGV] Mlet ntt: dx={dx}, dy={dy}, skickar kommando 9")
+        return
+
+
+server_sock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
+server_sock.bind(("", bluetooth.PORT_ANY))
+server_sock.listen(1)
+port = server_sock.getsockname()[1]
+print(f"[AGV] Bluetooth-server startad pÃ¥ port {port}. VÃ¤ntar pÃ¥ anslutning...")
+
+try:
+    while True:
+        client_sock, client_info = server_sock.accept()
+        print(f"[AGV] Klient ansluten: {client_info}")
+        data_buffer = ""
+        try:
+            while True:
+                data = client_sock.recv(1024).decode("utf-8")
+                if not data:
+                    break
+                data_buffer += data
+                lines = data_buffer.strip().splitlines()
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    print(f"[AGV] Mottaget: {line}")
+                    if line.startswith("GT"):
+                        coords = line.replace("GT,", "").split(",")
+                        target_x, target_y, V = coords if len(coords) == 3 else ("0", "0", "0")
+                        send_move_commands(esp_serial, target_x, target_y, V)
+                    elif line == "lidar":
+                        threading.Thread(target=lidar_task, args=(client_sock,), daemon=True).start()
+                    elif line == "STOP":
+                        esp_serial.write(b'9')
+                    elif line == "position":
+                        threading.Thread(target=dwm_position_task, args=(client_sock,), daemon=True).start()
+                data_buffer = ""
+        except OSError as e:
+            print(f"[AGV] Anslutning avslutad ({e})")
+        finally:
+            client_sock.close()
+            print("[AGV] VÃ¤ntar på ny anslutning...")
+except KeyboardInterrupt:
+    print("[AGV] Avslutar Bluetooth-server...")
+    server_sock.close()
+    esp_serial.close()
