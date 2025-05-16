@@ -1,0 +1,362 @@
+import bluetooth
+import time
+import os
+import serial
+import struct
+import threading
+import math
+import numpy as np
+import threading
+from collections import deque
+
+# === KONFIGURATION ===
+position_lock = threading.Lock()
+position_buffer_x = deque(maxlen=5)
+position_buffer_y = deque(maxlen=5)
+JUMP_THRESHOLD = 30
+SMOOTHING_FACTOR = 0.2
+x, y = 475.0, 190.0
+lidar_active = False
+LIDAR_PORT = "/dev/ttyUSB0"
+LIDAR_BAUDRATE = 460800
+CMD_STOP = b'\xA5\x25'
+CMD_SCAN = b'\xA5\x20'
+check_angles = [i for i in range(0, 360, 1)]
+esp_serial = serial.Serial('/dev/ttyS0', 115200, timeout=1)
+
+# === Funktioner ===
+# Globala hastighetsvariabler
+vx, vy = 0.0, 0.0
+last_time = time.time()
+
+lidar_data_valid = False
+alpha = 0.8  # Justerbar viktning mellan DWM och LiDAR
+
+reference_lidar_data = []
+current_lidar_data = []
+
+
+def correct_position_with_dwm_lidar():
+    global x, y
+
+    dwm_x, dwm_y = None, None
+    try:
+        with serial.Serial("/dev/ttyACM0", 115200, timeout=1) as ser:
+            ser.write(b"\r")
+            time.sleep(0.1)
+            ser.write(b"\r")
+            time.sleep(0.1)
+            ser.write(b"lep\r")
+            time.sleep(0.2)
+            line = ser.readline().decode("utf-8").strip()
+            if line.startswith("POS,"):
+                parts = line.split(",")
+                if len(parts) >= 3:
+                    try:
+                        dwm_x = float(parts[1]) * 100.0
+                        dwm_y = float(parts[2]) * 100.0
+                        print(f"[AGV] DWM1001 position: ({dwm_x}, {dwm_y})")
+                    except ValueError:
+                        print("[AGV] Fel vid avlÃ¤sning av DWM1001 position.")
+    except Exception as e:
+        print(f"[AGV] DWM1001 fel vid stopp: {e}")
+
+    if lidar_data_valid:
+        dx, dy = calculate_lidar_displacement(current_lidar_data)
+        lidar_data_valid = False
+        print(f"[AGV] LiDAR-fÃ¶rskjutning: dx={dx}, dy={dy}")
+    else:
+        print("[AGV] Ingen giltig LiDAR-data vid stopp.")
+        dx, dy = 0.0, 0.0
+
+    if dwm_x is not None and dwm_y is not None:
+        # Viktad kombination av DWM och LiDAR
+        corrected_x = alpha * dwm_x + (1 - alpha) * (x + dx)
+        corrected_y = alpha * dwm_y + (1 - alpha) * (y + dy)
+        update_position(corrected_x, corrected_y)
+        print(f"[AGV] Kalibrerad position: x={corrected_x}, y={corrected_y}")
+    else:
+        new_x = x + dx
+        new_y = y + dy
+        update_position(new_x, new_y)
+        print(f"[AGV] Uppdaterad position med enbart LiDAR: x={new_x}, y={new_y}")
+
+def set_lidar_reference(lidar_data):
+    global reference_lidar_data
+    reference_lidar_data = lidar_data.copy()
+    print(f"[AGV] LiDAR referenspunkt satt.")
+    
+def calculate_lidar_displacement(current_lidar_data):
+    global reference_lidar_data
+    dx_total, dy_total = 0.0, 0.0
+    count = 0
+
+    if len(reference_lidar_data) == 0:
+        print("[AGV] Ingen referenspunkt satt fÃ¶r LiDAR.")
+        return 0.0, 0.0
+
+    for i in range(len(current_lidar_data)):
+        d_ref = reference_lidar_data[i]
+        d_curr = current_lidar_data[i]
+        theta = math.radians(i)  # Anta att vinkeln Ã¶kar linjint (1 grad per steg)
+
+        dx = (d_curr * math.cos(theta)) - (d_ref * math.cos(theta))
+        dy = (d_curr * math.sin(theta)) - (d_ref * math.sin(theta))
+
+        dx_total += dx
+        dy_total += dy
+        count += 1
+
+    dx_average = dx_total / count if count > 0 else 0
+    dy_average = dy_total / count if count > 0 else 0
+
+    print(f"[AGV] LiDAR-rÃ¶relse: dx={dx_average:.2f}, dy={dy_average:.2f}")
+    return dx_average, dy_average
+
+def update_position_with_accelerometer(ax, ay):
+    global x, y, vx, vy, last_time
+
+    # Tidsintervall
+    current_time = time.time()
+    dt = current_time - last_time
+    last_time = current_time
+
+    # Uppdatera hastighet
+    vx += ax * dt
+    vy += ay * dt
+
+    dx = vx * dt + 0.5 * ax * (dt ** 2)
+    dy = vy * dt + 0.5 * ay * (dt ** 2)
+
+    # Uppdatera den globala positionen
+    new_x = x + dx
+    new_y = y + dy
+
+    update_position(new_x, new_y)
+    print(f"[AGV] PositionsfÃ¶rÃ¤ndring: dx={dx:.2f}, dy={dy:.2f}, Ny position: x={new_x:.2f}, y={new_y:.2f}")
+    
+def update_position(new_x, new_y):
+    global x, y
+    with position_lock:
+        x, y = new_x, new_y
+
+def get_position():
+    global x, y
+    with position_lock:
+        return x, y
+
+def calculate_displacement(ax, ay, dt):
+    dx = 0.5 * ax * (dt ** 2)
+    dy = 0.5 * ay * (dt ** 2)
+    return dx, dy
+    
+def get_dwm_position_when_stopped():
+    global x, y
+    try:
+        with serial.Serial("/dev/ttyACM0", 115200, timeout=1) as ser:
+            ser.write(b"lep\r")
+            time.sleep(0.1)
+            line = ser.readline().decode("utf-8").strip()
+            if line.startswith("POS,"):
+                parts = line.split(",")
+                if len(parts) >= 3:
+                    try:
+                        new_x = float(parts[1]) * 100.0
+                        new_y = float(parts[2]) * 100.0
+                        print(f"[AGV] Stoppat: DWM1001 position uppdaterad till: ({new_x}, {new_y})")
+                        update_position(new_x, new_y)
+                    except ValueError:
+                        print("[AGV] Fel vid avlÃ¤sning av DWM1001 position.")
+    except Exception as e:
+        print(f"[AGV] DWM1001 fel vid stopp: {e}")
+        
+def parse_packet(packet):
+    if len(packet) != 5:
+        return None
+    b0, b1, b2, b3, b4 = struct.unpack('<BBBBB', packet)
+    start_flag = b0 & 0x01
+    inverted_start_flag = (b0 >> 1) & 0x01
+    if start_flag != (~inverted_start_flag & 0x01):
+        return None
+    quality = b0 >> 2
+    angle_q6 = ((b2 << 7) | (b1 >> 1))
+    angle = (angle_q6 / 64.0) % 360
+    dist_q2 = (b4 << 8) | b3
+    distance_cm = round((dist_q2 / 4.0) / 10.0)
+    return angle, max(0, distance_cm), quality
+
+def lidar_task(client_sock):
+    global lidar_active
+    lidar_active = True
+    try:
+        with serial.Serial(LIDAR_PORT, LIDAR_BAUDRATE, timeout=1) as ser:
+            ser.write(CMD_STOP)
+            time.sleep(0.1)
+            ser.reset_input_buffer()
+            ser.write(CMD_SCAN)
+            get_descriptor(ser)
+            temp_array = [0] * len(check_angles)
+            current_index = 0
+            while lidar_active:
+                packet = ser.read(5)
+                if len(packet) != 5:
+                    continue
+                result = parse_packet(packet)
+                if result is None:
+                    continue
+                angle, distance_cm, _ = result
+                angle_rounded = round(angle)
+                target_angle = check_angles[current_index]
+                if abs(angle_rounded - target_angle) <= 1:
+                    temp_array[current_index] = round(distance_cm, 1)
+                    current_index += 1
+                    if current_index >= len(check_angles):
+                        current_index = 0
+                        lidar_string = "LIDAR:" + ",".join(map(str, temp_array))
+                        current_lidar_data = temp_array.copy()
+                        lidar_data_valid = True  # Markera att LiDAR-data r uppdaterad
+                        client_sock.send((lidar_string + "\n").encode("utf-8"))
+    except Exception as e:
+        print("[AGV] LIDAR-fel:", e)
+    finally:
+        try:
+            ser.write(CMD_STOP)
+            time.sleep(0.1)
+        except:
+            pass
+            
+def dwm_position_task(client_sock):
+    global x, y
+    ax, ay = 0.0, 0.0
+    try:
+        print("[AGV] DWM-positionering startad.")
+        while True:
+            if esp_serial.in_waiting:
+                esp_line = esp_serial.readline().decode().strip()
+                
+                if esp_line == '9':  
+                    print("[AGV] AGV stÃ¥r stilla - initierar DWM1001 fÃ¶r positionsavlÃ¤sning.")
+                    try:
+                        with serial.Serial("/dev/ttyACM0", 115200, timeout=1) as ser:
+                            ser.write(b"\r")
+                            time.sleep(0.1)
+                            ser.write(b"\r")
+                            time.sleep(0.1)
+                            ser.write(b'lep\r')
+                            line = ser.readline().decode("utf-8").strip()
+                            if line.startswith("POS,"):
+                                parts = line.split(",")
+                                if len(parts) >= 3:
+                                    try:
+                                        raw_x = float(parts[1]) * 100.0
+                                        raw_y = float(parts[2]) * 100.0
+                                        update_position(raw_x, raw_y)
+                                        client_sock.send(f"POS:{x},{y}\r\n".encode("utf-8"))
+                                        print(f"[AGV] DWM1001 position uppdaterad till: ({x}, {y})")
+                                    except ValueError:
+                                        print("[AGV] Fel vid avlÃ¤sning av DWM1001 position.")
+                    except Exception as e:
+                        print(f"[AGV] DWM1001 fel vid initiering: {e}")
+                
+                # Hantering av accelerometerdata
+                elif esp_line.startswith("mpu:"):
+                    try:
+                        parts = esp_line.replace("mpu:", "").split(",")
+                        ax = float(parts[0].split(":")[1])
+                        ay = float(parts[1].split(":")[1])
+                    except Exception as e:
+                        print("[Kalman] Fel vid parsing av MPU:", e)
+    except Exception as e:
+        print("[AGV] DWM-fel:", e)
+        
+def send_move_commands(esp_serial, target_x, target_y, angle):
+    try:
+        esp_serial.write(b'9')
+        target_x = float(target_x)
+        target_y = float(target_y)
+        angle = float(angle)
+    except ValueError as e:
+        print(f"[AGV] Fel vid konvertering av koordinater: {e}")
+        return
+    current_x, current_y = get_position()
+    dx = target_x - current_x
+    dy = target_y - current_y
+    
+    if angle == 0:
+        esp_serial.write(b'0')
+    elif angle == 45:
+        esp_serial.write(b'2')
+    elif angle == 90:
+        esp_serial.write(b'3')
+    elif angle == 135:
+        esp_serial.write(b'4')
+    elif angle == 180 or angle == -180:
+        esp_serial.write(b'5')
+    elif angle == -45:
+        esp_serial.write(b'6')
+    elif angle == -90:
+        esp_serial.write(b'7')
+    elif angle == -135:
+        esp_serial.write(b'8')
+    else:
+        esp_serial.write(b'9')
+        print("[AGV] AGV stÃ¥r stilla - kalibrerar position.")
+        correct_position_with_dwm_lidar()
+
+    esp_serial.write(b'0')  
+    while abs(dx) > 10 and abs(dy) > 10:
+        current_x, current_y = get_position()
+        dx = target_x - current_x
+        dy = target_y - current_y
+
+    if abs(dx) <= 10 and abs(dy) <= 10:
+        print(f"[AGV] NÃ¤ra mÃ¥let: dx={dx}, dy={dy}, skickar kommando 9 (stopp)")
+        esp_serial.write(b'9')
+        print("[AGV] AGV stÃ¥r stilla - kalibrerar position.")
+        correct_position_with_dwm_lidar()
+        print(f"[AGV] MÃ¥let nÃ¥tt: dx={dx}, dy={dy}, skickar kommando 9")
+        return
+
+server_sock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
+server_sock.bind(("", bluetooth.PORT_ANY))
+server_sock.listen(1)
+port = server_sock.getsockname()[1]
+print(f"[AGV] Bluetooth-server startad pÃ¥ port {port}. VÃ¤ntar pÃ¥ anslutning...")
+
+try:
+    while True:
+        client_sock, client_info = server_sock.accept()
+        print(f"[AGV] Klient ansluten: {client_info}")
+        data_buffer = ""
+        try:
+            while True:
+                data = client_sock.recv(1024).decode("utf-8")
+                if not data:
+                    break
+                data_buffer += data
+                lines = data_buffer.strip().splitlines()
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    print(f"[AGV] Mottaget: {line}")
+                    if line.startswith("GT"):
+                        coords = line.replace("GT,", "").split(",")
+                        target_x, target_y, V = coords if len(coords) == 3 else ("0", "0", "0")
+                        send_move_commands(esp_serial, target_x, target_y, V)
+                    elif line == "lidar":
+                        threading.Thread(target=lidar_task, args=(client_sock,), daemon=True).start()
+                    elif line == "STOP":
+                        esp_serial.write(b'9')
+                    elif line == "position":
+                        threading.Thread(target=dwm_position_task, args=(client_sock,), daemon=True).start()
+                data_buffer = ""
+        except OSError as e:
+            print(f"[AGV] Anslutning avslutad ({e})")
+        finally:
+            client_sock.close()
+            print("[AGV] VÃ¤ntar pÃ¥ ny anslutning...")
+except KeyboardInterrupt:
+    print("[AGV] Avslutar Bluetooth-server...")
+    server_sock.close()
+    esp_serial.close()
