@@ -5,6 +5,9 @@ import javax.microedition.io.StreamConnection;
 import java.io.*;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+import javax.swing.SwingUtilities;
 
 public class BluetoothClient {
 
@@ -19,6 +22,11 @@ public class BluetoothClient {
     private AutoNavigate an;
     private MapPanel mp;
     private double headingOffset = 0.0;
+    private boolean initialRouteCalculated = false;
+    private final Object routeLock = new Object();
+    private double lastValidX = -1;
+private double lastValidY = -1;
+
 
     public BluetoothClient(ControlUIny gui, DataStore ds, AutoNavigate an) {
         this.gui = gui;
@@ -248,6 +256,29 @@ public void receiveLidarData() {
         gui.appendStatus("❌ Fel vid statusförfrågan: " + e.getMessage() + "\n");
     }
 }
+    private void sanitizePosition() {
+    // Kontrollera om positionen är (0.0, 0.0)
+    if (ds.robotX == 0.0 && ds.robotY == 0.0) {
+        gui.appendStatus("⚠️ Ogiltig position (0.0, 0.0) upptäckt – återställer.\n");
+
+        // Om vi har en tidigare giltig position, använd den
+        if (lastValidX != -1 && lastValidY != -1) {
+            ds.robotX = lastValidX;
+            ds.robotY = lastValidY;
+            gui.appendStatus("🔄 Återställer till senaste giltiga position: (" + lastValidX + ", " + lastValidY + ")\n");
+        } else {
+            // Om ingen giltig position finns, markera som ogiltig
+            ds.robotX = -1;
+            ds.robotY = -1;
+            gui.appendStatus("🚫 Ingen giltig tidigare position – markerar som ogiltig.\n");
+        }
+    } else {
+        // Uppdatera senaste giltiga position
+        lastValidX = ds.robotX;
+        lastValidY = ds.robotY;
+    }
+}
+
  public void startPositionTracking() {
     gui.appendStatus("🚀 Startar tråd för positionsuppdatering...\n");
 
@@ -279,15 +310,34 @@ public void receiveLidarData() {
         }
     }).start();
 }
+// Resetfunktion för att återställa ruttberäkning
+private void resetRouteCalculation() {
+    synchronized (routeLock) {
+        // Återställ ruttberäkningsflaggan
+        initialRouteCalculated = false;
+        // Rensa kopierad ruttlista om den finns
+        if (ds.copypath != null) {
+            ds.copypath.clear();
+        }
+        // Rensa senaste position om den är ogiltig
+        if (ds.robotX == 0.0 && ds.robotY == 0.0) {
+            ds.robotX = -1;
+            ds.robotY = -1;
+        }
+        gui.appendStatus("🔄 Ruttberäkningsflagga och ruttdata återställda.\n");
+    }
+}
+
 
 
 public void startUnifiedReceiver() {
     if (!isConnected()) return;
-
+    resetRouteCalculation();
+    
     gui.appendStatus("🚀 Startar kombinerad mottagning av position och LIDAR...\n");
 
     new Thread(() -> {
-        boolean initialRouteCalculated = false;  // Flagga för initial rutt
+          // Flagga för initial rutt
 
         try {
             while (true) {
@@ -302,6 +352,7 @@ public void startUnifiedReceiver() {
                 }
 
                 gui.appendStatus("📨 Mottaget: " + line + "\n");
+                
 
                 // Hantering av positionsdata
                 if (line.startsWith("POS:")) {
@@ -310,23 +361,36 @@ public void startUnifiedReceiver() {
                         try {
                             double x = Double.parseDouble(parts[0].trim());
                             double y = Double.parseDouble(parts[1].trim());
+                            sanitizePosition();
 
                             ds.robotX = x;
                             ds.robotY = y;
+                            gui.repaint();
+                            System.out.println(x+","+y);
+                            
+                            if (!initialRouteCalculated && ds.robotX != 0 && ds.robotY != 0) {
+                                new Thread(() -> {
+                                    
+                                    synchronized(routeLock) {
+                                        gui.appendStatus("🧭 Initierar ruttberäkning...\n");
+                                        an.startKartplanering();
+                                        gui.repaint();
+                                        initialRouteCalculated = true;
+                                        gui.appendStatus("✅ Ruttberäkning slutförd.\n");
+                                    }
+                                    SwingUtilities.invokeLater(() -> {
+                                        gui.repaint();
+                                        gui.appendStatus("🖌️ Rutt ritad på kartan.\n");
+                                    });
+                                }).start();
+}
+
 
                             gui.appendStatus(String.format("📍 Uppdaterad position: X=%.1f cm, Y=%.1f cm\n", ds.robotX, ds.robotY));
-                            gui.repaint();
+                            
 
                             // Här startar du ruttberäkning första gången position finns
-                            if (!initialRouteCalculated) {
-                                initialRouteCalculated = true;
-                                gui.appendStatus("🗺️ Startar initial ruttberäkning...\n");
-                                new Thread(() -> {
-                                    an.startKartplanering();
-                                    gui.repaint();
-                                    gui.appendStatus("✅ Initial rutt beräknad.\n");
-                                }).start();
-                            }
+                           
                         } catch (NumberFormatException e) {
                             gui.appendStatus("⚠️ Felaktig POS-data: " + line + "\n");
                         }
@@ -335,6 +399,10 @@ public void startUnifiedReceiver() {
 
                 // Hantering av LIDAR-data
                 else if (line.startsWith("LIDAR:")) {
+                    if (ds.isRotating) {
+                        gui.appendStatus("⏳ Rotation pågår – LIDAR-data ignoreras.\n");
+                        return;
+    }
                     String[] parts = line.substring(6).split(",");
                     if (parts.length != 360) {
                         gui.appendStatus("⚠️ Felaktig LIDAR-vektor (ej 360 värden): " + parts.length + "\n");
@@ -344,10 +412,11 @@ public void startUnifiedReceiver() {
                     boolean blockerat = false;
                     for (int i = 0; i < parts.length; i++) {
                         try {
-                            double angleRad = Math.toRadians(i);
+                            int adjustedAngle = (i + (int) ds.agvDirection) % 360;
+                            double angleRad = Math.toRadians(adjustedAngle);
                             double distance = Double.parseDouble(parts[i].trim());
 
-                            if (distance <= 30.0 || distance >= 500.0 || distance == 0) continue;
+                            if (distance <= 30.0 || distance >= 200.0 || distance == 0) continue;
 
                             double deltaX = distance * Math.cos(angleRad);
                             double deltaY = distance * Math.sin(angleRad);
@@ -358,7 +427,7 @@ public void startUnifiedReceiver() {
                             int row = (int) (obsY / ds.gridsize);
                             int col = (int) (obsX / ds.gridsize);
 
-                            if (row >= 0 && row < ds.rows && col >= 0 && col < ds.columns) {
+                            if (row >= 0 && row < ds.rows && col >= 0 && col < ds.columns ) {
                                 if (ds.ObstacleMatrix[row][col] == 3) blockerat = true;
                                 ds.ObstacleMatrix[row][col] = 1;
                                 lastLidarPoints.add(new int[]{row, col});
@@ -372,17 +441,23 @@ public void startUnifiedReceiver() {
                     gui.repaint();
 
                     if (blockerat) {
-                        gui.appendStatus("🛑 Rutt blockerad – räknar om...\n");
-                        new Thread(() -> {
-                            for (int i = 0; i < ds.rows; i++) {
-                                for (int j = 0; j < ds.columns; j++) {
-                                    if (ds.ObstacleMatrix[i][j] == 3) ds.ObstacleMatrix[i][j] = 0;
-                                }
+                        // Stoppa roboten omedelbart
+                        stopRobot();
+                        gui.appendStatus("🛑 Rutt blockerad – roboten stannar.\n");
+
+                        // Räkna om rutt i samma tråd för att vänta tills rutten är färdig
+                        gui.appendStatus("🔄 Räknar om ny rutt...\n");
+                        for (int i = 0; i < ds.rows; i++) {
+                            for (int j = 0; j < ds.columns; j++) {
+                                if (ds.ObstacleMatrix[i][j] == 3) ds.ObstacleMatrix[i][j] = 0;
                             }
-                            an.startKartplanering();
-                            gui.appendStatus("✅ Ny rutt beräknad efter blockering.\n");
-                        }).start();
-                    }
+                        }
+
+    // Starta om ruttberäkningen
+    an.startKartplanering();
+    gui.appendStatus("✅ Ny rutt beräknad – roboten kan återuppta.\n");
+}
+
                 } else {
                     gui.appendStatus("ℹ️ Okänt meddelande: " + line + "\n");
                 }
